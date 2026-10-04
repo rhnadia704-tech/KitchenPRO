@@ -34,10 +34,14 @@ class RomForgeStorageManager(private val context: Context) {
     private val prefs = context.getSharedPreferences("rom_forge_storage_prefs", Context.MODE_PRIVATE)
 
     fun hasAllFilesAccessPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
-            true
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Environment.isExternalStorageManager()
+            } else {
+                true
+            }
+        } catch (_: Throwable) {
+            false
         }
     }
 
