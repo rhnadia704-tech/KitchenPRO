@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -39,12 +40,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.local.ArtCacheEntity
 import com.example.ui.KitchenUiState
+import com.example.ui.components.DecompiledImgTargetSelectorCard
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun GeneratorScreen(
     uiState: KitchenUiState,
     artCacheEntries: List<ArtCacheEntity>,
+    onSelectDecompiledImg: (String) -> Unit,
+    onPickCustomSafTree: (Uri?) -> Unit,
     onUpdateOptions: (String, String, Boolean) -> Unit,
     onRunDex2oat: (Boolean) -> Unit,
     onClearMd5Cache: () -> Unit
@@ -59,6 +63,18 @@ fun GeneratorScreen(
     ) {
         item {
             Spacer(modifier = Modifier.height(6.dp))
+            // Step 1: Select which Decompiled IMG to generate ART (.odex/.vdex) & fs-verity for
+            DecompiledImgTargetSelectorCard(
+                title = "1. Sélectionner l'IMG Décompilé cible pour le Generator :",
+                availableFolders = uiState.availableDecompiledImgs,
+                selectedFolderName = uiState.selectedDecompiledImgName,
+                selectedFullPath = uiState.selectedDecompiledImgFullPath,
+                onSelectFolder = onSelectDecompiledImg,
+                onPickExternalSafTree = onPickCustomSafTree
+            )
+        }
+
+        item {
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -78,7 +94,7 @@ fun GeneratorScreen(
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Orchestration dex2oat (.odex/.vdex), métadonnées Merkle fsvmeta & Cache MD5 intelligent",
+                                text = "Génère .odex, .vdex, .fsv_meta et otacerts.zip dans '${uiState.selectedDecompiledImgName}'",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -154,7 +170,7 @@ fun GeneratorScreen(
                         ) {
                             Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Compiler (Delta MD5)")
+                            Text("Générer dans ${uiState.selectedDecompiledImgName}")
                         }
 
                         FilledTonalButton(
@@ -176,14 +192,15 @@ fun GeneratorScreen(
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = "Bilan ART : ${rep.compiledCount} compilés | ${rep.skippedByMd5CacheCount} ignorés (Cache MD5) | ${rep.fsVerityGeneratedCount} fsvmeta",
+                                    text = "Bilan ART (${rep.targetDecompiledFolder}) : ${rep.compiledCount} compilés | ${rep.skippedByMd5CacheCount} en cache MD5 | ${rep.fsVerityGeneratedCount} fsvmeta",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                                 Text(
-                                    text = "Durée : ${rep.elapsedMs}ms • otacerts.zip synchronisé : ${if (rep.otaCertsUpdated) "OUI" else "NON"}",
+                                    text = "Sortie : ${rep.targetAbsolutePath}",
                                     style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                             }
@@ -238,7 +255,7 @@ fun GeneratorScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "Lancez 'Compiler (Delta MD5)' pour générer les fichiers oat/arm64/*.odex et *.vdex.",
+                            text = "Sélectionnez votre IMG décompilé ci-dessus et lancez 'Générer' pour compiler les fichiers oat/arm64/*.odex et *.vdex.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

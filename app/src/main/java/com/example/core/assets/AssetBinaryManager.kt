@@ -1,6 +1,7 @@
 package com.example.core.assets
 
 import android.content.Context
+import com.example.core.storage.RomForgeStorageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,7 +16,10 @@ data class ExtractedBinary(
     val sizeBytes: Long
 )
 
-class AssetBinaryManager(private val context: Context) {
+class AssetBinaryManager(
+    private val context: Context,
+    val storageManager: RomForgeStorageManager = RomForgeStorageManager(context)
+) {
 
     private val binaryCatalog = listOf(
         "avbtool" to "AVB 2.0 Hashtree & VBMeta Signer (arm64-static)",
@@ -27,9 +31,14 @@ class AssetBinaryManager(private val context: Context) {
         "lpunpack" to "Dynamic Super Partition Logical Unpacker"
     )
 
+    // Binaries must remain in context.filesDir/bin so Linux kernel mounts them without noexec
     fun getBinDir(): File = File(context.filesDir, "bin").apply { mkdirs() }
 
-    fun getWorkspaceDir(): File = File(context.filesDir, "workspace").apply { mkdirs() }
+    /**
+     * Returns the user-visible `/storage/emulated/0/ROM_FORGE` (or `/storage/emulated/0/Download/ROM_FORGE`)
+     * workspace directory instead of hidden `Android/data` or `/data/user/0`.
+     */
+    fun getWorkspaceDir(): File = storageManager.getRomForgePublicRoot()
 
     suspend fun extractAndVerifyBinaries(onLog: (String) -> Unit): List<ExtractedBinary> =
         withContext(Dispatchers.IO) {
@@ -48,7 +57,6 @@ class AssetBinaryManager(private val context: Context) {
                         }
                     }
                 } catch (e: Exception) {
-                    // Fallback deterministic static binary wrapper if asset stream fails
                     targetFile.writeText(
                         "#!/system/bin/sh\necho \"[$name-arm64] Static Binary Executed: \$@\"\nexit 0\n"
                     )
@@ -71,193 +79,203 @@ class AssetBinaryManager(private val context: Context) {
                 onLog("[BIN] Extrait & chmod 0755 : $name (SHA256: ${sha256.take(12)}...)")
             }
 
-            initializeWorkspaceTree(onLog)
+            initializePublicRomForgeTree(onLog)
             results
         }
 
     /**
-     * Initializes a realistic, inspectable AOSP workspace inside context.filesDir/workspace
-     * so users can immediately inspect, modify, sign, compile, or port real files in Non-Root mode,
-     * as well as import external .img files via SAF.
+     * Initializes the public `/storage/emulated/0/ROM_FORGE/` directory structure
+     * (`decompiled_imgs/system_ext4`, `decompiled_imgs/stock_vendor_ref`, `signed_apks`, `compiled_imgs`, `keystore_aosp`)
+     * and mirrors it to `Download/ROM_FORGE` if Android 11+ All Files Access is not yet granted.
      */
-    private fun initializeWorkspaceTree(onLog: (String) -> Unit) {
-        val ws = getWorkspaceDir()
-        val systemRoot = File(ws, "system_ext4")
-        if (!File(systemRoot, "build.prop").exists()) {
-            File(systemRoot, "etc/selinux").mkdirs()
-            File(systemRoot, "etc/permissions").mkdirs()
-            File(systemRoot, "etc/security").mkdirs()
-            File(systemRoot, "priv-app/SystemUI").mkdirs()
-            File(systemRoot, "priv-app/Settings").mkdirs()
-            File(systemRoot, "app/Bluetooth").mkdirs()
-            File(systemRoot, "framework").mkdirs()
-            File(systemRoot, "product/overlay").mkdirs()
-            File(systemRoot, "lib64").mkdirs()
+    suspend fun initializePublicRomForgeTree(onLog: (String) -> Unit) = withContext(Dispatchers.IO) {
+        val decompiledRoot = storageManager.getExtractedImagesRoot()
+        val systemRoot = File(decompiledRoot, "system_ext4")
+        val LegacyLink = File(getWorkspaceDir(), "system_ext4")
 
-            File(systemRoot, "build.prop").writeText(
-                """
-                # begin build properties
-                ro.build.id=AP3A.241005.015
-                ro.build.display.id=lineage_gsi_arm64-userdebug 15 AP3A.241005.015
-                ro.build.version.release=15
-                ro.build.version.sdk=35
-                ro.product.system.brand=Android
-                ro.product.system.name=treble_arm64_bvN
-                ro.product.system.device=generic_arm64
-                ro.build.tags=test-keys
-                ro.adb.secure=1
-                ro.debuggable=1
-                # end build properties
-                """.trimIndent()
-            )
+        populateDecompiledImgStructure(systemRoot, "system_ext4")
+        // Keep root-level alias `ROM_FORGE/system_ext4` synchronized as well
+        if (LegacyLink.absolutePath != systemRoot.absolutePath && !File(LegacyLink, "build.prop").exists()) {
+            populateDecompiledImgStructure(LegacyLink, "system_ext4")
+        }
 
-            File(systemRoot, "etc/selinux/plat_mac_permissions.xml").writeText(
-                """
-                <?xml version="1.0" encoding="utf-8"?>
-                <policy>
-                    <signer signature="308204a830820390a003020102020900d7b412f9a1c30001">
-                        <seinfo value="platform" />
-                    </signer>
-                    <signer signature="308204a830820390a003020102020900d7b412f9a1c30002">
-                        <seinfo value="media" />
-                    </signer>
-                    <signer signature="308204a830820390a003020102020900d7b412f9a1c30003">
-                        <seinfo value="shared" />
-                    </signer>
-                    <signer signature="308204a830820390a003020102020900d7b412f9a1c30004">
-                        <seinfo value="default" />
-                    </signer>
-                </policy>
-                """.trimIndent()
-            )
+        val stockVendor = File(getWorkspaceDir(), "stock_vendor_ref")
+        populateStockVendorReference(stockVendor)
 
-            File(systemRoot, "etc/selinux/plat_file_contexts").writeText(
-                """
-                /                           u:object_r:rootfs:s0
-                /init                       u:object_r:init_exec:s0
-                /system(/.*)?               u:object_r:system_file:s0
-                /system/bin/sh              u:object_r:shell_exec:s0
-                /system/bin/init            u:object_r:init_exec:s0
-                /system/lib64(/.*)?         u:object_r:system_lib_file:s0
-                /product/overlay(/.*)?      u:object_r:vendor_overlay_file:s0
-                """.trimIndent()
-            )
+        onLog("[ROM_FORGE] Dossier principal initialisé : ${storageManager.getUserVisibleDisplayRoot()}/decompiled_imgs/system_ext4")
+    }
 
-            File(systemRoot, "etc/fs_config").writeText(
-                """
-                / 0 0 0755
-                system 0 0 0755
-                system/bin 0 2000 0755
-                system/bin/init 0 2000 0750
-                system/bin/sh 0 2000 0755
-                system/etc 0 0 0755
-                system/lib64 0 0 0755
-                product/overlay 0 0 0755
-                """.trimIndent()
-            )
+    fun populateDecompiledImgStructure(targetDir: File, imgLabel: String) {
+        if (File(targetDir, "build.prop").exists()) return
+        File(targetDir, "etc/selinux").mkdirs()
+        File(targetDir, "etc/permissions").mkdirs()
+        File(targetDir, "etc/security").mkdirs()
+        File(targetDir, "priv-app/SystemUI").mkdirs()
+        File(targetDir, "priv-app/Settings").mkdirs()
+        File(targetDir, "app/Bluetooth").mkdirs()
+        File(targetDir, "framework").mkdirs()
+        File(targetDir, "product/overlay").mkdirs()
+        File(targetDir, "lib64").mkdirs()
 
-            // Create valid minimal ZIP/APK structures for SystemUI.apk, Settings.apk, framework-res.apk
-            createMinimalSampleApk(
-                File(systemRoot, "priv-app/SystemUI/SystemUI.apk"),
-                "com.android.systemui",
-                "platform"
-            )
-            createMinimalSampleApk(
-                File(systemRoot, "priv-app/Settings/Settings.apk"),
-                "com.android.settings",
-                "platform"
-            )
-            createMinimalSampleApk(
-                File(systemRoot, "app/Bluetooth/Bluetooth.apk"),
-                "com.android.bluetooth",
-                "shared"
-            )
-            createMinimalSampleApk(
-                File(systemRoot, "framework/framework-res.apk"),
-                "android",
-                "platform"
-            )
+        File(targetDir, "build.prop").writeText(
+            """
+            # begin build properties ($imgLabel)
+            ro.build.id=AP3A.241005.015
+            ro.build.display.id=lineage_gsi_arm64-userdebug 15 AP3A.241005.015
+            ro.build.version.release=15
+            ro.build.version.sdk=35
+            ro.product.system.brand=Android
+            ro.product.system.name=$imgLabel
+            ro.product.system.device=generic_arm64
+            ro.build.tags=test-keys
+            ro.adb.secure=1
+            ro.debuggable=1
+            # end build properties
+            """.trimIndent()
+        )
 
-            // Also create a Stock Vendor reference tree for Auto-Porter (Xiaomi Tucana / SM8550 reference)
-            val stockVendor = File(ws, "stock_vendor_ref")
-            File(stockVendor, "etc/vintf").mkdirs()
-            File(stockVendor, "etc/permissions").mkdirs()
-            File(stockVendor, "etc/selinux").mkdirs()
-            File(stockVendor, "lib64/hw").mkdirs()
-            File(stockVendor, "overlay").mkdirs()
+        File(targetDir, "etc/selinux/plat_mac_permissions.xml").writeText(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <policy>
+                <signer signature="308204a830820390a003020102020900d7b412f9a1c30001">
+                    <seinfo value="platform" />
+                </signer>
+                <signer signature="308204a830820390a003020102020900d7b412f9a1c30002">
+                    <seinfo value="media" />
+                </signer>
+                <signer signature="308204a830820390a003020102020900d7b412f9a1c30003">
+                    <seinfo value="shared" />
+                </signer>
+                <signer signature="308204a830820390a003020102020900d7b412f9a1c30004">
+                    <seinfo value="default" />
+                </signer>
+            </policy>
+            """.trimIndent()
+        )
 
-            File(stockVendor, "build.prop").writeText(
-                """
-                ro.product.vendor.brand=Xiaomi
-                ro.product.vendor.device=tucana
-                ro.product.vendor.model=Mi Note 10 Pro
-                ro.board.platform=sm6150
-                ro.hardware.fp.fod=true
-                ro.hardware.fp.fod.location.x=445
-                ro.hardware.fp.fod.location.y=1910
-                ro.hardware.fp.fod.size=190
-                persist.vendor.sys.fp.fod.hbm.node=/sys/class/drm/card0-DSI-1/disp_param
-                ro.SurfaceFlinger.max_frame_buffer_acquired_buffers=3
-                """.trimIndent()
-            )
+        File(targetDir, "etc/selinux/plat_file_contexts").writeText(
+            """
+            /                           u:object_r:rootfs:s0
+            /init                       u:object_r:init_exec:s0
+            /system(/.*)?               u:object_r:system_file:s0
+            /system/bin/sh              u:object_r:shell_exec:s0
+            /system/bin/init            u:object_r:init_exec:s0
+            /system/lib64(/.*)?         u:object_r:system_lib_file:s0
+            /product/overlay(/.*)?      u:object_r:vendor_overlay_file:s0
+            """.trimIndent()
+        )
 
-            File(stockVendor, "etc/permissions/android.hardware.fingerprint.xml").writeText(
-                """
-                <?xml version="1.0" encoding="utf-8"?>
-                <permissions>
-                    <feature name="android.hardware.fingerprint" />
-                    <feature name="vendor.xiaomi.hardware.fingerprintextension" />
-                    <library name="com.goodix.fingerprint.extension" file="/vendor/framework/goodix_fp.jar" />
-                </permissions>
-                """.trimIndent()
-            )
+        File(targetDir, "etc/fs_config").writeText(
+            """
+            / 0 0 0755
+            system 0 0 0755
+            system/bin 0 2000 0755
+            system/bin/init 0 2000 0750
+            system/bin/sh 0 2000 0755
+            system/etc 0 0 0755
+            system/lib64 0 0 0755
+            product/overlay 0 0 0755
+            """.trimIndent()
+        )
 
-            File(stockVendor, "etc/vintf/manifest.xml").writeText(
-                """
-                <manifest version="2.0" type="device" target-level="7">
-                    <hal format="hidl">
-                        <name>vendor.xiaomi.hardware.fingerprintextension</name>
-                        <transport>hwbinder</transport>
-                        <version>1.0</version>
-                        <interface>
-                            <name>IXiaomiFingerprint</name>
-                            <instance>default</instance>
-                        </interface>
-                    </hal>
-                    <hal format="hidl">
-                        <name>vendor.goodix.hardware.biometrics.fingerprint</name>
-                        <transport>hwbinder</transport>
-                        <version>2.1</version>
-                    </hal>
-                </manifest>
-                """.trimIndent()
-            )
+        createMinimalSampleApk(
+            File(targetDir, "priv-app/SystemUI/SystemUI.apk"),
+            "com.android.systemui",
+            "platform"
+        )
+        createMinimalSampleApk(
+            File(targetDir, "priv-app/Settings/Settings.apk"),
+            "com.android.settings",
+            "platform"
+        )
+        createMinimalSampleApk(
+            File(targetDir, "app/Bluetooth/Bluetooth.apk"),
+            "com.android.bluetooth",
+            "shared"
+        )
+        createMinimalSampleApk(
+            File(targetDir, "framework/framework-res.apk"),
+            "android",
+            "platform"
+        )
+    }
 
-            // Create realistic ELF 64-bit shared library headers in Stock Vendor
-            val vendorLibs = listOf(
-                "lib64/libgf_hal.so",
-                "lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so",
-                "lib64/vendor.goodix.hardware.biometrics.fingerprint@2.1.so",
-                "lib64/libaudioroute_ext.so",
-                "lib64/libcamxexternalformatutils.so",
-                "lib64/libril-qc-qmi-1.so",
-                "lib64/hw/audio.primary.sm6150.so",
-                "lib64/hw/biometrics.fingerprint.goodix.so"
-            )
-            vendorLibs.forEach { rel ->
-                val f = File(stockVendor, rel)
-                f.parentFile?.mkdirs()
-                f.writeBytes(buildElf64BinaryWithDtNeeded(rel.substringAfterLast("/")))
-            }
+    private fun populateStockVendorReference(stockVendor: File) {
+        if (File(stockVendor, "build.prop").exists()) return
+        File(stockVendor, "etc/vintf").mkdirs()
+        File(stockVendor, "etc/permissions").mkdirs()
+        File(stockVendor, "etc/selinux").mkdirs()
+        File(stockVendor, "lib64/hw").mkdirs()
+        File(stockVendor, "overlay").mkdirs()
 
-            onLog("[WORKSPACE] Arborescence AOSP System & Stock Vendor initialisée dans ${ws.absolutePath}")
+        File(stockVendor, "build.prop").writeText(
+            """
+            ro.product.vendor.brand=Xiaomi
+            ro.product.vendor.device=tucana
+            ro.product.vendor.model=Mi Note 10 Pro
+            ro.board.platform=sm6150
+            ro.hardware.fp.fod=true
+            ro.hardware.fp.fod.location.x=445
+            ro.hardware.fp.fod.location.y=1910
+            ro.hardware.fp.fod.size=190
+            persist.vendor.sys.fp.fod.hbm.node=/sys/class/drm/card0-DSI-1/disp_param
+            ro.SurfaceFlinger.max_frame_buffer_acquired_buffers=3
+            """.trimIndent()
+        )
+
+        File(stockVendor, "etc/permissions/android.hardware.fingerprint.xml").writeText(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <permissions>
+                <feature name="android.hardware.fingerprint" />
+                <feature name="vendor.xiaomi.hardware.fingerprintextension" />
+                <library name="com.goodix.fingerprint.extension" file="/vendor/framework/goodix_fp.jar" />
+            </permissions>
+            """.trimIndent()
+        )
+
+        File(stockVendor, "etc/vintf/manifest.xml").writeText(
+            """
+            <manifest version="2.0" type="device" target-level="7">
+                <hal format="hidl">
+                    <name>vendor.xiaomi.hardware.fingerprintextension</name>
+                    <transport>hwbinder</transport>
+                    <version>1.0</version>
+                    <interface>
+                        <name>IXiaomiFingerprint</name>
+                        <instance>default</instance>
+                    </interface>
+                </hal>
+                <hal format="hidl">
+                    <name>vendor.goodix.hardware.biometrics.fingerprint</name>
+                    <transport>hwbinder</transport>
+                    <version>2.1</version>
+                </hal>
+            </manifest>
+            """.trimIndent()
+        )
+
+        val vendorLibs = listOf(
+            "lib64/libgf_hal.so",
+            "lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so",
+            "lib64/vendor.goodix.hardware.biometrics.fingerprint@2.1.so",
+            "lib64/libaudioroute_ext.so",
+            "lib64/libcamxexternalformatutils.so",
+            "lib64/libril-qc-qmi-1.so",
+            "lib64/hw/audio.primary.sm6150.so",
+            "lib64/hw/biometrics.fingerprint.goodix.so"
+        )
+        vendorLibs.forEach { rel ->
+            val f = File(stockVendor, rel)
+            f.parentFile?.mkdirs()
+            f.writeBytes(buildElf64BinaryWithDtNeeded(rel.substringAfterLast("/")))
         }
     }
 
-    private fun createMinimalSampleApk(targetFile: File, packageName: String, sharedUserId: String) {
+    fun createMinimalSampleApk(targetFile: File, packageName: String, sharedUserId: String) {
         targetFile.parentFile?.mkdirs()
         java.util.zip.ZipOutputStream(targetFile.outputStream()).use { zos ->
-            // 1. AndroidManifest.xml (pseudo-AXML with metadata)
             val manifestEntry = java.util.zip.ZipEntry("AndroidManifest.xml")
             zos.putNextEntry(manifestEntry)
             zos.write(
@@ -271,7 +289,6 @@ class AssetBinaryManager(private val context: Context) {
             )
             zos.closeEntry()
 
-            // 2. classes.dex (valid DEX 039 magic header + bytecode payload)
             val dexBytes = ByteArray(512)
             val dexMagic = "dex\n039\u0000".toByteArray()
             System.arraycopy(dexMagic, 0, dexBytes, 0, dexMagic.size)
@@ -283,7 +300,6 @@ class AssetBinaryManager(private val context: Context) {
             zos.write(dexBytes)
             zos.closeEntry()
 
-            // 3. resources.arsc (STORED uncompressed for 4-byte zipalign verification)
             val arscBytes = "ARSC_TABLE_${packageName}_CONFIG_OVERLAY_V35".toByteArray().copyOf(256)
             val crc = java.util.zip.CRC32().apply { update(arscBytes) }
             val arscEntry = java.util.zip.ZipEntry("resources.arsc").apply {
@@ -296,7 +312,6 @@ class AssetBinaryManager(private val context: Context) {
             zos.write(arscBytes)
             zos.closeEntry()
 
-            // 4. Old META-INF testkey entry to demonstrate Sign Pro stripping
             val oldMf = java.util.zip.ZipEntry("META-INF/MANIFEST.MF")
             zos.putNextEntry(oldMf)
             zos.write("Manifest-Version: 1.0\nCreated-By: Legacy AOSP TestKey\n\n".toByteArray())
@@ -306,15 +321,14 @@ class AssetBinaryManager(private val context: Context) {
 
     private fun buildElf64BinaryWithDtNeeded(libName: String): ByteArray {
         val buf = ByteArray(256)
-        // ELF Magic: 0x7F 'E' 'L' 'F', Class=2 (64-bit), Data=1 (Little Endian), Machine=0xB7 (AArch64)
         buf[0] = 0x7F
         buf[1] = 'E'.code.toByte()
         buf[2] = 'L'.code.toByte()
         buf[3] = 'F'.code.toByte()
-        buf[4] = 2 // ELFCLASS64
-        buf[5] = 1 // ELFDATA2LSB
-        buf[6] = 1 // EV_CURRENT
-        buf[18] = 0xB7.toByte() // EM_AARCH64
+        buf[4] = 2
+        buf[5] = 1
+        buf[6] = 1
+        buf[18] = 0xB7.toByte()
         val meta = "SONAME:$libName;DT_NEEDED:libhidlbase.so;DT_NEEDED:libbinder_ndk.so;DT_NEEDED:liblog.so".toByteArray()
         System.arraycopy(meta, 0, buf, 64, meta.size.coerceAtMost(180))
         return buf

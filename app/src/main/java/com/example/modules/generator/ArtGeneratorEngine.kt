@@ -13,6 +13,8 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 data class ArtGenerationReport(
+    val targetDecompiledFolder: String,
+    val targetAbsolutePath: String,
     val totalScanned: Int,
     val compiledCount: Int,
     val skippedByMd5CacheCount: Int,
@@ -23,17 +25,21 @@ data class ArtGenerationReport(
 
 /**
  * Module 3: Generator (ART Cache dex2oat Orchestrator, FS-Verity Merkle Tree Generator & MD5 Cache).
- * - Orchestrates extracted `dex2oat` binary to compile .odex and .vdex artifacts under oat/arm64/.
- * - Generates `.fsv_meta` (fs-verity SHA-256 4096-byte Merkle root descriptor) when requested.
- * - Uses persistent Room MD5 cache (`ArtCacheEntity`) so unchanged APKs are skipped automatically.
- * - Rebuilds `/system/etc/security/otacerts.zip` and `apex_pubkey` whenever signatures change.
+ * Operates on the user-selected decompiled `.img` directory inside `/storage/emulated/0/ROM_FORGE/decompiled_imgs/<folder>`.
  */
 class ArtGeneratorEngine(
-    private val workspaceDir: File,
+    private val defaultWorkspaceDir: File,
     private val binDir: File,
     private val shellEngine: HybridShellEngine,
     private val repository: RomKitchenRepository
 ) {
+
+    private fun resolveDecompiledDir(customDir: File?): File {
+        if (customDir != null && customDir.exists()) return customDir
+        val decompiledSystem = File(defaultWorkspaceDir, "decompiled_imgs/system_ext4")
+        if (decompiledSystem.exists()) return decompiledSystem
+        return File(defaultWorkspaceDir, "system_ext4")
+    }
 
     suspend fun generateArtCacheAndSecurityArtifacts(
         compilerFilter: String, // speed, speed-profile, verify, everything
@@ -41,20 +47,22 @@ class ArtGeneratorEngine(
         enableFsVerity: Boolean,
         forceRecompile: Boolean,
         activeKeys: List<KeyManifestEntity>,
+        targetDecompiledDir: File? = null,
         onLog: (String) -> Unit
     ): ArtGenerationReport = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        val systemRoot = File(workspaceDir, "system_ext4")
-        val apkFiles = systemRoot.walkTopDown().filter { it.isFile && it.extension == "apk" }.toList()
+        val systemRoot = resolveDecompiledDir(targetDecompiledDir)
+        val apkFiles = systemRoot.walkTopDown().filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }.toList()
 
         var compiled = 0
         var skipped = 0
         var fsvCount = 0
 
+        onLog("[ART-GEN] Cible IMG décompilée : ${systemRoot.absolutePath} (${apkFiles.size} APKs)")
         onLog("[ART-GEN] Orchestration dex2oat ($instructionSet | filtre=$compilerFilter | fs-verity=$enableFsVerity)...")
 
         for (apk in apkFiles) {
-            val relPath = apk.relativeTo(systemRoot).path
+            val relPath = "${systemRoot.name}/${apk.relativeTo(systemRoot).path}"
             val currentMd5 = computeMd5(apk)
             val cached = repository.getCacheForApk(relPath)
 
@@ -77,14 +85,12 @@ class ArtGeneratorEngine(
                 continue
             }
 
-            // Execute static dex2oat binary from extracted assets
             val dex2oatBin = File(binDir, "dex2oat").absolutePath
             val cmd = "$dex2oatBin --dex-file=${apk.absolutePath} --oat-file=${odexFile.absolutePath} " +
                     "--output-vdex=${vdexFile.absolutePath} --instruction-set=$instructionSet " +
                     "--compiler-filter=$compilerFilter"
             shellEngine.executeCommand(cmd, onLineOutput = onLog)
 
-            // Write deterministic ELF64 OAT (.odex) and VDEX (.vdex) headers
             odexFile.writeBytes(buildOatElfHeader(apk.name, compilerFilter, instructionSet, currentMd5))
             vdexFile.writeBytes(buildVdexHeader(apk.name, currentMd5))
             compiled++
@@ -115,9 +121,11 @@ class ArtGeneratorEngine(
 
         val otaUpdated = synchronizeOtaCertsZip(systemRoot, activeKeys, onLog)
         val elapsed = System.currentTimeMillis() - start
-        onLog("[ART-GEN] Terminé en ${elapsed}ms : $compiled compilés, $skipped en cache MD5, $fsvCount fsvmeta, otacerts.zip=$otaUpdated")
+        onLog("[ART-GEN] Terminé en ${elapsed}ms dans ${systemRoot.absolutePath} : $compiled compilés, $skipped en cache MD5, $fsvCount fsvmeta")
 
         ArtGenerationReport(
+            targetDecompiledFolder = systemRoot.name,
+            targetAbsolutePath = systemRoot.absolutePath,
             totalScanned = apkFiles.size,
             compiledCount = compiled,
             skippedByMd5CacheCount = skipped,
@@ -127,10 +135,6 @@ class ArtGeneratorEngine(
         )
     }
 
-    /**
-     * Rebuilds `/system/etc/security/otacerts.zip` containing the active `.x509.pem` certificates
-     * so Recovery & UpdateEngine trust OTA packages signed by the new Key Maker chain.
-     */
     private fun synchronizeOtaCertsZip(
         systemRoot: File,
         activeKeys: List<KeyManifestEntity>,
@@ -150,7 +154,7 @@ class ArtGeneratorEngine(
                 }
             }
         }
-        onLog("[SECURITY-SYNC] /system/etc/security/otacerts.zip reconstruit avec ${activeKeys.size} certificats X.509")
+        onLog("[SECURITY-SYNC] ${otaZip.absolutePath} reconstruit avec ${activeKeys.size} certificats X.509")
         return true
     }
 
@@ -161,11 +165,10 @@ class ArtGeneratorEngine(
         md5: String
     ): ByteArray {
         val out = ByteArrayOutputStream()
-        // ELF64 Magic + OAT\n199\0 header
         out.write(byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2, 1, 1, 0))
         out.write("OAT\n199\u0000".toByteArray())
         out.write("ISA=$isa;FILTER=$filter;SOURCE=$apkName;MD5=$md5;".toByteArray())
-        out.write(ByteArray(512)) // Code & quickened oat section
+        out.write(ByteArray(512))
         return out.toByteArray()
     }
 
@@ -177,9 +180,6 @@ class ArtGeneratorEngine(
         return out.toByteArray()
     }
 
-    /**
-     * Builds an Android fs-verity descriptor + 4096-byte block SHA-256 Merkle tree digest.
-     */
     private fun buildFsVerityMerkleMetadata(apkFile: File): ByteArray {
         val fileBytes = apkFile.readBytes()
         val blockSize = 4096

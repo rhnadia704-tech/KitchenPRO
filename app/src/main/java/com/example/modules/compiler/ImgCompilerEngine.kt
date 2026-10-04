@@ -23,6 +23,7 @@ data class PreFlightAuditItem(
 )
 
 data class CompilationBuildOutput(
+    val sourceDecompiledDir: String,
     val systemImgPath: String,
     val systemImgSizeBytes: Long,
     val vbmetaImgPath: String,
@@ -33,29 +34,29 @@ data class CompilationBuildOutput(
     val elapsedMs: Long
 )
 
-/**
- * Module 4: Compilation & Anti-Bootloop Orchestrator.
- * - Runs static pre-flight analysis on SELinux `plat_file_contexts` regexes and `fs_config` UID/GID/octal modes.
- * - Automatically remediates dangerous permissions (`/system/bin/init` 0750, `su` 06755) to prevent bootloops.
- * - Orchestrates `mke2fs` (EXT4) or `mkfs.erofs` (EROFS LZ4HC) to rebuild `system.img`.
- * - Invokes `avbtool` to inject the dm-verity SHA-256 hash tree footer and generate `vbmeta.img` (AVB0).
- */
 class ImgCompilerEngine(
-    private val workspaceDir: File,
+    private val defaultWorkspaceDir: File,
     private val binDir: File,
     private val shellEngine: HybridShellEngine
 ) {
 
+    private fun resolveDecompiledDir(customDir: File?): File {
+        if (customDir != null && customDir.exists()) return customDir
+        val decompiledSystem = File(defaultWorkspaceDir, "decompiled_imgs/system_ext4")
+        if (decompiledSystem.exists()) return decompiledSystem
+        return File(defaultWorkspaceDir, "system_ext4")
+    }
+
     suspend fun runPreFlightStaticAudit(
         autoRepairBootloopRisks: Boolean,
+        targetDecompiledDir: File? = null,
         onLog: (String) -> Unit
     ): List<PreFlightAuditItem> = withContext(Dispatchers.IO) {
-        val systemRoot = File(workspaceDir, "system_ext4")
+        val systemRoot = resolveDecompiledDir(targetDecompiledDir)
         val results = mutableListOf<PreFlightAuditItem>()
 
-        onLog("[ANTI-BOOTLOOP] Démarrage de l'analyse statique pré-compilation (SELinux & fs_config)...")
+        onLog("[ANTI-BOOTLOOP] Analyse statique pré-compilation sur ${systemRoot.absolutePath}...")
 
-        // 1. SELinux plat_file_contexts regex & label syntax validation
         val fcFile = File(systemRoot, "etc/selinux/plat_file_contexts")
         if (fcFile.exists()) {
             val lines = fcFile.readLines().toMutableList()
@@ -96,14 +97,13 @@ class ImgCompilerEngine(
                     category = "SELinux Contexts",
                     checkName = "Validation Regex & Labels plat_file_contexts",
                     passed = (syntaxErrors == 0 || repaired),
-                    detail = if (syntaxErrors == 0) "${lines.size} règles u:object_r:*:s0 validées sans conflit"
+                    detail = if (syntaxErrors == 0) "${lines.size} règles u:object_r:*:s0 validées dans ${systemRoot.name}"
                     else "Corrigé $syntaxErrors règle(s) SELinux malformée(s)",
                     autoFixed = repaired
                 )
             )
         }
 
-        // 2. POSIX fs_config UID/GID & Octal Mode verification
         val fsConfigFile = File(systemRoot, "etc/fs_config")
         if (fsConfigFile.exists()) {
             var content = fsConfigFile.readText()
@@ -129,7 +129,6 @@ class ImgCompilerEngine(
             )
         }
 
-        // 3. Verify build.prop integrity
         val buildProp = File(systemRoot, "build.prop")
         val hasBuildProp = buildProp.exists() && buildProp.readText().contains("ro.build.version.sdk=")
         results.add(
@@ -137,12 +136,11 @@ class ImgCompilerEngine(
                 category = "System Properties",
                 checkName = "Intégrité /system/build.prop & SDK Level",
                 passed = hasBuildProp,
-                detail = if (hasBuildProp) "Propriétés ro.build.version.sdk=35 et ro.product.system.* présentes"
+                detail = if (hasBuildProp) "Propriétés ro.build.version.sdk=35 présentes dans ${systemRoot.name}"
                 else "build.prop manquant ou incomplet"
             )
         )
 
-        // 4. Verify Framework-res & SystemUI presence
         val hasFramework = File(systemRoot, "framework/framework-res.apk").exists()
         val hasSystemUi = File(systemRoot, "priv-app/SystemUI/SystemUI.apk").exists()
         results.add(
@@ -150,38 +148,36 @@ class ImgCompilerEngine(
                 category = "Core Packages",
                 checkName = "Présence de framework-res.apk & SystemUI.apk",
                 passed = hasFramework && hasSystemUi,
-                detail = "Packages critiques AOSP détectés et alignés sur 4096 octets"
+                detail = "Packages critiques AOSP détectés dans ${systemRoot.absolutePath}"
             )
         )
 
         results
     }
 
-    /**
-     * Full compilation pipeline:
-     * 1. Pre-flight static check
-     * 2. Build `system.img` via `mke2fs` (EXT4) or `mkfs.erofs` (EROFS)
-     * 3. Inject `dm-verity` hashtree footer via `avbtool add_hashtree_footer`
-     * 4. Generate `vbmeta.img` via `avbtool make_vbmeta_image`
-     */
     suspend fun compileSystemAndVbmetaImages(
         format: FilesystemFormat,
         enableDmVerity: Boolean,
         disableVerityFlagsInVbmeta: Boolean,
         activeKeys: List<KeyManifestEntity>,
+        targetDecompiledDir: File? = null,
+        outputImagesDir: File? = null,
         onLog: (String) -> Unit
     ): CompilationBuildOutput = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        val systemRoot = File(workspaceDir, "system_ext4")
-        val outDir = File(workspaceDir, "output_images").apply { mkdirs() }
-        val systemImg = File(outDir, "system_${format.name.lowercase()}.img")
-        val vbmetaImg = File(outDir, "vbmeta.img")
+        val systemRoot = resolveDecompiledDir(targetDecompiledDir)
+        val outDir = (outputImagesDir ?: File(defaultWorkspaceDir, "compiled_imgs")).apply { mkdirs() }
+        val systemImg = File(outDir, "${systemRoot.name}_${format.name.lowercase()}.img")
+        val vbmetaImg = File(outDir, "vbmeta_${systemRoot.name}.img")
 
-        val preFlight = runPreFlightStaticAudit(autoRepairBootloopRisks = true, onLog = onLog)
+        val preFlight = runPreFlightStaticAudit(
+            autoRepairBootloopRisks = true,
+            targetDecompiledDir = systemRoot,
+            onLog = onLog
+        )
         val fcPath = File(systemRoot, "etc/selinux/plat_file_contexts").absolutePath
         val fsConfigPath = File(systemRoot, "etc/fs_config").absolutePath
 
-        // Step 2: Execute filesystem builder binary
         if (format == FilesystemFormat.EXT4) {
             val mke2fsBin = File(binDir, "mke2fs").absolutePath
             val cmd = "$mke2fsBin -L system -M /system -E android_sparse -d ${systemRoot.absolutePath} " +
@@ -199,7 +195,6 @@ class ImgCompilerEngine(
             writeStructuredFilesystemImage(systemImg, isErofs = true, systemRoot = systemRoot)
         }
 
-        // Step 3: AVB 2.0 dm-verity hashtree footer injection
         val avbBin = File(binDir, "avbtool").absolutePath
         val platformKeyPath = activeKeys.find { it.role == "platform" }?.pk8Path ?: "default_platform.pk8"
         val rootDigest = computeMerkleHashtreeDigest(systemRoot)
@@ -208,24 +203,24 @@ class ImgCompilerEngine(
             val avbFooterCmd = "$avbBin add_hashtree_footer --image ${systemImg.absolutePath} " +
                     "--partition_name system --partition_size ${systemImg.length() + 65536} " +
                     "--hash_algorithm sha256 --key $platformKeyPath --algorithm SHA256_RSA2048"
-            onLog("[AVB-HASHTREE] Injection de l'arbre de hachage dm-verity : $avbFooterCmd")
+            onLog("[AVB-HASHTREE] Injection dm-verity : $avbFooterCmd")
             shellEngine.executeCommand(avbFooterCmd, onLineOutput = onLog)
             appendAvbHashtreeFooter(systemImg, rootDigest)
         }
 
-        // Step 4: Generate vbmeta.img (AVB0 2.0 header)
-        val flags = if (disableVerityFlagsInVbmeta) 3 else 0 // 3 = HASHTREE_DISABLED | VERIFICATION_DISABLED
+        val flags = if (disableVerityFlagsInVbmeta) 3 else 0
         val vbmetaCmd = "$avbBin make_vbmeta_image --output ${vbmetaImg.absolutePath} " +
                 "--key $platformKeyPath --algorithm SHA256_RSA2048 " +
                 "--include_descriptors_from_image ${systemImg.absolutePath} --flags $flags"
-        onLog("[AVB-VBMETA] Génération de vbmeta.img (flags=$flags) : $vbmetaCmd")
+        onLog("[AVB-VBMETA] Génération de ${vbmetaImg.name} (flags=$flags) : $vbmetaCmd")
         shellEngine.executeCommand(vbmetaCmd, onLineOutput = onLog)
         writeValidAvb0VbmetaImage(vbmetaImg, rootDigest, flags, platformKeyPath)
 
         val elapsed = System.currentTimeMillis() - start
-        onLog("[COMPILER] Images générées avec succès en ${elapsed}ms -> ${systemImg.name} (${systemImg.length() / 1024} KB) & ${vbmetaImg.name} (${vbmetaImg.length()} octets)")
+        onLog("[COMPILER] Sortie dans ROM_FORGE : ${systemImg.absolutePath} (${systemImg.length() / 1024} KB)")
 
         CompilationBuildOutput(
+            sourceDecompiledDir = systemRoot.absolutePath,
             systemImgPath = systemImg.absolutePath,
             systemImgSizeBytes = systemImg.length(),
             vbmetaImgPath = vbmetaImg.absolutePath,
@@ -243,18 +238,15 @@ class ImgCompilerEngine(
         RandomAccessFile(targetImg, "rw").use { raf ->
             raf.setLength(totalPayload + 65536L)
             if (isErofs) {
-                // EROFS Superblock Magic at offset 1024: 0xE0F5E1E2 (LE: E2 E1 F5 E0)
                 raf.seek(1024)
                 raf.write(byteArrayOf(0xE2.toByte(), 0xE1.toByte(), 0xF5.toByte(), 0xE0.toByte()))
                 raf.write("EROFS_LZ4HC_SYSTEM_V35".toByteArray())
             } else {
-                // EXT4 Superblock Magic at offset 1024 + 0x38 (1080): 0xEF53 (LE: 53 EF)
                 raf.seek(1024 + 0x38)
                 raf.write(byteArrayOf(0x53.toByte(), 0xEF.toByte()))
                 raf.seek(1024 + 0x78)
                 raf.write("system".toByteArray().copyOf(16))
             }
-            // Write file table index at offset 4096
             raf.seek(4096)
             for (f in files.take(32)) {
                 val entryLine = "INODE:${f.relativeTo(systemRoot).path}:${f.length()}\n"
@@ -268,7 +260,6 @@ class ImgCompilerEngine(
             val footerOffset = raf.length()
             raf.setLength(footerOffset + 4096)
             raf.seek(footerOffset + 4096 - 64)
-            // AVB Footer Magic "AVBf"
             raf.write("AVBf".toByteArray())
             raf.write("DM_VERITY_SHA256:$rootDigest".toByteArray().copyOf(56))
         }
@@ -283,14 +274,11 @@ class ImgCompilerEngine(
         RandomAccessFile(vbmetaImg, "rw").use { raf ->
             raf.setLength(4096)
             raf.seek(0)
-            // AVB0 Magic: "AVB0" + version 1.3
             raf.write("AVB0".toByteArray())
-            raf.writeInt(1) // Required libavb version major
-            raf.writeInt(3) // Required libavb version minor
-            // Flags at offset 120
+            raf.writeInt(1)
+            raf.writeInt(3)
             raf.seek(120)
             raf.writeInt(flags)
-            // Embed descriptor & root digest at offset 256
             raf.seek(256)
             raf.write("HASHTREE_DESC:partition=system;algo=sha256;digest=$rootDigest;key=$keyPath".toByteArray())
         }

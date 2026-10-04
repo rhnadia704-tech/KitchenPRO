@@ -26,44 +26,56 @@ data class ApkSignTarget(
 )
 
 data class BatchSignResult(
+    val targetDescription: String,
     val totalApks: Int,
     val signedSuccess: Int,
     val totalBytesProcessed: Long,
     val elapsedMs: Long,
-    val macPermissionsUpdated: Boolean
+    val macPermissionsUpdated: Boolean,
+    val outputDirectoryPath: String
 )
 
 /**
  * Module 2: Sign Pro (Intelligent & High-Speed In-Memory APK Resigner + SELinux mac_permissions.xml Injector).
- * - Reads APKs via streaming ZipInputStream, strips legacy META-INF entries on the fly,
- *   computes SHA-256 digests in-memory while copying to ZipOutputStream, preserves STORED 4K/16K alignment
- *   for resources.arsc and .so libraries, and writes new MANIFEST.MF, CERT.SF, and RSA-2048 signed CERT.RSA.
- * - Parses and updates plat_mac_permissions.xml so PackageManagerService trusts the new key chain.
+ * Supports TWO explicit user workflows:
+ * 1. Decompiled .IMG Directory Mode: Select any decompiled .img folder inside `ROM_FORGE/decompiled_imgs/...`
+ *    (or via SAF folder picker), scan all its APKs, resign them in-memory, and update its `plat_mac_permissions.xml`.
+ * 2. Standalone Single APK Mode: Pick any individual `.apk` file from device storage, choose the key role
+ *    (`platform`, `media`, `shared`, `testkey`), resign it in-memory, and output directly to `/storage/emulated/0/ROM_FORGE/signed_apks/`.
  */
 class SignProEngine(
-    private val workspaceDir: File,
+    private val defaultWorkspaceDir: File,
     private val keyMakerEngine: KeyMakerEngine
 ) {
 
-    suspend fun scanSystemApks(): List<ApkSignTarget> = withContext(Dispatchers.IO) {
-        val systemRoot = File(workspaceDir, "system_ext4")
-        val apks = systemRoot.walkTopDown().filter { it.isFile && it.extension == "apk" }.toList()
-        apks.map { file ->
-            val rel = file.relativeTo(systemRoot).path
-            val role = detectOptimalKeyRole(file)
-            val customSigned = checkIfSignedByRomForge(file)
-            ApkSignTarget(
-                name = file.name,
-                relativePath = rel,
-                absolutePath = file.absolutePath,
-                detectedRole = role,
-                sizeBytes = file.length(),
-                isSignedWithCustomKey = customSigned
-            )
-        }
+    private fun resolveDecompiledDir(customDir: File?): File {
+        if (customDir != null && customDir.exists()) return customDir
+        val decompiledSystem = File(defaultWorkspaceDir, "decompiled_imgs/system_ext4")
+        if (decompiledSystem.exists()) return decompiledSystem
+        return File(defaultWorkspaceDir, "system_ext4")
     }
 
-    private fun detectOptimalKeyRole(apkFile: File): String {
+    suspend fun scanSystemApks(targetDecompiledDir: File? = null): List<ApkSignTarget> =
+        withContext(Dispatchers.IO) {
+            val rootDir = resolveDecompiledDir(targetDecompiledDir)
+            if (!rootDir.exists()) return@withContext emptyList()
+            val apks = rootDir.walkTopDown().filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }.toList()
+            apks.map { file ->
+                val rel = file.relativeTo(rootDir).path
+                val role = detectOptimalKeyRole(file)
+                val customSigned = checkIfSignedByRomForge(file)
+                ApkSignTarget(
+                    name = file.name,
+                    relativePath = rel,
+                    absolutePath = file.absolutePath,
+                    detectedRole = role,
+                    sizeBytes = file.length(),
+                    isSignedWithCustomKey = customSigned
+                )
+            }
+        }
+
+    fun detectOptimalKeyRole(apkFile: File): String {
         val name = apkFile.name.lowercase()
         return when {
             name.contains("systemui") || name.contains("settings") || name.contains("framework") -> "platform"
@@ -86,32 +98,34 @@ class SignProEngine(
     }
 
     /**
-     * Streams an APK in-memory, strips META-INF/, preserves STORED entries (resources.arsc / .so),
-     * computes SHA-256 entry hashes, and signs with the matching role key from KeyMaker.
+     * Mode 1: Batch-signs all APKs inside the selected decompiled .img folder in-memory
+     * and injects the new key certificates into `<targetDecompiledDir>/etc/selinux/plat_mac_permissions.xml`.
      */
     suspend fun signAllApksInMemoryAndPatchMacPermissions(
         keys: List<KeyManifestEntity>,
         updateMacPerm: Boolean,
+        targetDecompiledDir: File? = null,
         onLog: (String) -> Unit
     ): BatchSignResult = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        val targets = scanSystemApks()
+        val rootDir = resolveDecompiledDir(targetDecompiledDir)
+        val targets = scanSystemApks(rootDir)
         var successCount = 0
         var bytesProcessed = 0L
 
         val keyMap = keys.associateBy { it.role }
         if (keyMap.isEmpty()) {
             onLog("[SIGN-PRO] ERREUR : Aucune clé disponible dans le Keystore. Générez d'abord les clés dans Key Maker.")
-            return@withContext BatchSignResult(targets.size, 0, 0L, 0L, false)
+            return@withContext BatchSignResult(rootDir.name, targets.size, 0, 0L, 0L, false, rootDir.absolutePath)
         }
 
-        onLog("[SIGN-PRO] Démarrage du flux In-Memory I/O sur ${targets.size} APKs système (zéro extraction disque)...")
+        onLog("[SIGN-PRO] Cible IMG décompilée : ${rootDir.absolutePath} (${targets.size} APKs détectés)")
 
         for (target in targets) {
             val apkFile = File(target.absolutePath)
             val keyEntity = keyMap[target.detectedRole] ?: keyMap["testkey"] ?: keys.first()
 
-            val signedBytes = signSingleApkInMemoryStream(apkFile, keyEntity, onLog)
+            val signedBytes = signSingleApkInMemoryStream(apkFile, keyEntity)
             apkFile.writeBytes(signedBytes)
             bytesProcessed += signedBytes.size
             successCount++
@@ -120,25 +134,52 @@ class SignProEngine(
 
         var macUpdated = false
         if (updateMacPerm) {
-            macUpdated = patchMacPermissionsXml(keys, onLog)
-            updateBuildPropTags(onLog)
+            macUpdated = patchMacPermissionsXml(keys, rootDir, onLog)
+            updateBuildPropTags(rootDir, onLog)
         }
 
         val elapsed = System.currentTimeMillis() - start
-        onLog("[SIGN-PRO] Opération terminée en ${elapsed}ms : $successCount/${targets.size} APKs signés, mac_permissions.xml=$macUpdated")
+        onLog("[SIGN-PRO] Terminé en ${elapsed}ms dans ${rootDir.absolutePath} : $successCount/${targets.size} APKs signés")
         BatchSignResult(
+            targetDescription = "IMG Décompilé : ${rootDir.name}",
             totalApks = targets.size,
             signedSuccess = successCount,
             totalBytesProcessed = bytesProcessed,
             elapsedMs = elapsed,
-            macPermissionsUpdated = macUpdated
+            macPermissionsUpdated = macUpdated,
+            outputDirectoryPath = rootDir.absolutePath
         )
+    }
+
+    /**
+     * Mode 2: Signs a single standalone APK selected by the user and writes it to
+     * `/storage/emulated/0/ROM_FORGE/signed_apks/<name>_signed_<role>.apk`.
+     */
+    suspend fun signStandaloneApkFile(
+        sourceApkFile: File,
+        outputDir: File,
+        selectedRole: String,
+        keys: List<KeyManifestEntity>,
+        onLog: (String) -> Unit
+    ): File = withContext(Dispatchers.IO) {
+        outputDir.mkdirs()
+        val keyMap = keys.associateBy { it.role }
+        val keyEntity = keyMap[selectedRole] ?: keyMap["platform"] ?: keys.first()
+
+        onLog("[SIGN-PRO-APK] Lecture In-Memory de l'APK individuel : ${sourceApkFile.name} (Rôle=${keyEntity.role})...")
+        val signedBytes = signSingleApkInMemoryStream(sourceApkFile, keyEntity)
+
+        val baseName = sourceApkFile.nameWithoutExtension.removeSuffix("_unsigned")
+        val outFile = File(outputDir, "${baseName}_signed_${keyEntity.role}.apk")
+        outFile.writeBytes(signedBytes)
+
+        onLog("[SIGN-PRO-APK] APK individuel resigné avec succès -> ${outFile.absolutePath} (${signedBytes.size / 1024} KB)")
+        outFile
     }
 
     private fun signSingleApkInMemoryStream(
         sourceApk: File,
-        keyEntity: KeyManifestEntity,
-        onLog: (String) -> Unit
+        keyEntity: KeyManifestEntity
     ): ByteArray {
         val outBuffer = ByteArrayOutputStream(sourceApk.length().toInt().coerceAtLeast(4096))
         val entryDigests = linkedMapOf<String, String>()
@@ -152,13 +193,11 @@ class SignProEngine(
                     val current = entry ?: continue
                     val entryName = current.name
 
-                    // Strip legacy META-INF signatures on the fly
                     if (entryName.startsWith("META-INF/", ignoreCase = true)) {
                         zis.closeEntry()
                         continue
                     }
 
-                    // Read entry bytes in-memory to compute SHA-256 and preserve STORED method if needed
                     val entryDataOut = ByteArrayOutputStream()
                     val sha256 = MessageDigest.getInstance("SHA-256")
                     var read: Int
@@ -170,7 +209,6 @@ class SignProEngine(
                     val b64Digest = Base64.encodeToString(sha256.digest(), Base64.NO_WRAP)
                     entryDigests[entryName] = b64Digest
 
-                    // Ensure resources.arsc and native .so libs stay STORED (uncompressed) for 4K/16K page alignment
                     val mustStoreUncompressed = entryName == "resources.arsc" || entryName.endsWith(".so")
                     val newEntry = ZipEntry(entryName)
                     if (mustStoreUncompressed) {
@@ -224,7 +262,7 @@ class SignProEngine(
                 zos.write(certSfBytes)
                 zos.closeEntry()
 
-                // 3. Sign CERT.SF using the RSA-2048 PrivateKey (.pk8) and embed into META-INF/CERT.RSA
+                // 3. Sign CERT.SF using RSA-2048 PrivateKey (.pk8)
                 val privateKey = keyMakerEngine.loadPrivateKey(keyEntity.pk8Path)
                 val rsaSigner = Signature.getInstance("SHA256withRSA")
                 rsaSigner.initSign(privateKey)
@@ -232,7 +270,6 @@ class SignProEngine(
                 val digitalSig = rsaSigner.sign()
 
                 val certRsaOut = ByteArrayOutputStream()
-                // PKCS#7 SignedData header + X.509 cert hex + RSA-2048 signature block
                 certRsaOut.write("PKCS7_SIGNED_DATA_V2_AOSP:".toByteArray())
                 certRsaOut.write(keyEntity.sha256Fingerprint.toByteArray())
                 certRsaOut.write(digitalSig)
@@ -245,13 +282,12 @@ class SignProEngine(
         return outBuffer.toByteArray()
     }
 
-    /**
-     * Parses and rewrites `/system/etc/selinux/plat_mac_permissions.xml` with the exact hex certificates
-     * from Key Maker so SELinux MAC validation matches the newly signed system APKs.
-     */
-    fun patchMacPermissionsXml(keys: List<KeyManifestEntity>, onLog: (String) -> Unit): Boolean {
-        val systemRoot = File(workspaceDir, "system_ext4")
-        val macFile = File(systemRoot, "etc/selinux/plat_mac_permissions.xml")
+    fun patchMacPermissionsXml(
+        keys: List<KeyManifestEntity>,
+        targetRootDir: File,
+        onLog: (String) -> Unit
+    ): Boolean {
+        val macFile = File(targetRootDir, "etc/selinux/plat_mac_permissions.xml")
         macFile.parentFile?.mkdirs()
 
         val roleToSeinfo = mapOf(
@@ -276,21 +312,22 @@ class SignProEngine(
         }
 
         macFile.writeText(xml)
-        onLog("[SIGN-PRO] Injection SELinux réussie dans ${macFile.relativeTo(workspaceDir).path} (${keys.size} signers injectés)")
+        onLog("[SIGN-PRO] Injection SELinux réussie dans ${macFile.absolutePath} (${keys.size} signers injectés)")
         return true
     }
 
-    private fun updateBuildPropTags(onLog: (String) -> Unit) {
-        val propFile = File(workspaceDir, "system_ext4/build.prop")
+    private fun updateBuildPropTags(targetRootDir: File, onLog: (String) -> Unit) {
+        val propFile = File(targetRootDir, "build.prop")
         if (propFile.exists()) {
             val updated = propFile.readText().replace("ro.build.tags=test-keys", "ro.build.tags=release-keys")
             propFile.writeText(updated)
-            onLog("[SIGN-PRO] build.prop mis à jour : ro.build.tags=release-keys")
+            onLog("[SIGN-PRO] ${propFile.absolutePath} mis à jour : ro.build.tags=release-keys")
         }
     }
 
-    fun readCurrentMacPermissionsXml(): String {
-        val macFile = File(workspaceDir, "system_ext4/etc/selinux/plat_mac_permissions.xml")
-        return if (macFile.exists()) macFile.readText() else "<!-- Fichier plat_mac_permissions.xml introuvable -->"
+    fun readCurrentMacPermissionsXml(targetDecompiledDir: File? = null): String {
+        val rootDir = resolveDecompiledDir(targetDecompiledDir)
+        val macFile = File(rootDir, "etc/selinux/plat_mac_permissions.xml")
+        return if (macFile.exists()) macFile.readText() else "<!-- Fichier plat_mac_permissions.xml introuvable dans ${rootDir.name} -->"
     }
 }

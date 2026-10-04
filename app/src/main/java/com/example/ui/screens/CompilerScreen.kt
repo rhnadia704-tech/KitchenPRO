@@ -41,10 +41,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.modules.compiler.FilesystemFormat
 import com.example.ui.KitchenUiState
+import com.example.ui.components.DecompiledImgTargetSelectorCard
 
 @Composable
 fun CompilerScreen(
     uiState: KitchenUiState,
+    onSelectDecompiledImg: (String) -> Unit,
+    onPickCustomSafTree: (Uri?) -> Unit,
     onUpdateOptions: (FilesystemFormat, Boolean, Boolean) -> Unit,
     onRunPreFlightAudit: (Boolean) -> Unit,
     onCompileImages: () -> Unit,
@@ -64,7 +67,7 @@ fun CompilerScreen(
     ) {
         item {
             Spacer(modifier = Modifier.height(6.dp))
-            // Hybrid IMG Mount / SAF Unpack Card
+            // Hybrid IMG Decompiler into /storage/emulated/0/ROM_FORGE/decompiled_imgs/
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -79,12 +82,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "EXTRACTEUR & MONTEUR HYBRIDE (.IMG)",
+                                text = "1. DÉCOMPILATEUR .IMG -> STOCKAGE /ROM_FORGE",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Supporte EXT4 (0xEF53), EROFS (0xE0F5E1E2), Sparse (0xED26FF3A) en mode Root Loop ou Non-Root SAF",
+                                text = "Extrait vos fichiers .img directement dans /storage/emulated/0/ROM_FORGE/decompiled_imgs/ (et Download/ROM_FORGE sans root)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -103,7 +106,7 @@ fun CompilerScreen(
                         ) {
                             Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Charger .img (SAF)")
+                            Text("Choisir .IMG à Décompiler")
                         }
 
                         Button(
@@ -115,33 +118,46 @@ fun CompilerScreen(
                         ) {
                             Icon(imageVector = Icons.Default.Storage, contentDescription = null)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Monter / Décompresser")
+                            Text("Décompiler vers ROM_FORGE")
                         }
                     }
 
                     uiState.lastMountedImgReport?.let { rep ->
                         Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            color = MaterialTheme.colorScheme.secondaryContainer,
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = "Image Active : ${rep.fileName} [${rep.format}]",
+                                    text = "Image Décompilée : ${rep.fileName} [${rep.format}] (${rep.extractedFilesCount} fichiers)",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
-                                    text = "Magic : ${rep.magicHex} • Fichiers : ${rep.extractedFilesCount} • Point : ${rep.mountPointUsed}",
+                                    text = "Dossier de sortie visible : ${rep.mountPointUsed}",
                                     style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Selector for which decompiled IMG folder to audit & recompile
+        item {
+            DecompiledImgTargetSelectorCard(
+                title = "2. Dossier IMG Décompilé à Recompiler :",
+                availableFolders = uiState.availableDecompiledImgs,
+                selectedFolderName = uiState.selectedDecompiledImgName,
+                selectedFullPath = uiState.selectedDecompiledImgFullPath,
+                onSelectFolder = onSelectDecompiledImg,
+                onPickExternalSafTree = onPickCustomSafTree
+            )
         }
 
         // Orchestrateur de Compilation EXT4 / EROFS + AVB 2.0
@@ -160,12 +176,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "MODULE 4 • ORCHESTRATEUR DE COMPILATION & AVB 2.0",
+                                text = "3. RECONSTRUCTION .IMG & VBMETA -> ROM_FORGE",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Reconstruction system.img (mke2fs / mkfs.erofs) + arbre dm-verity & génération vbmeta.img",
+                                text = "Compile '${uiState.selectedDecompiledImgName}' en system.img & vbmeta.img dans /storage/emulated/0/ROM_FORGE/compiled_imgs/",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -265,7 +281,7 @@ fun CompilerScreen(
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
-                                    text = "system.img : ${out.systemImgSizeBytes / 1024} KB (${out.format.magicHex})\nvbmeta.img : ${out.vbmetaImgSizeBytes} octets (AVB0)\nRoot Digest : ${out.dmVerityRootDigest.take(28)}...",
+                                    text = "IMG : ${out.systemImgPath} (${out.systemImgSizeBytes / 1024} KB)\nVBMeta : ${out.vbmetaImgPath} (${out.vbmetaImgSizeBytes} B)\nRoot Digest : ${out.dmVerityRootDigest.take(24)}...",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -280,7 +296,7 @@ fun CompilerScreen(
         // Pre-Flight Static Analysis Checklist
         item {
             Text(
-                text = "Contrôles Statiques Anti-Bootloop (SELinux & fs_config)",
+                text = "Contrôles Statiques Anti-Bootloop (${uiState.selectedDecompiledImgName})",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )

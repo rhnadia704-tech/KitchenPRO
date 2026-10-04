@@ -69,7 +69,6 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
     val alerts by viewModel.alertsFlow.collectAsStateWithLifecycle()
     val portHistory by viewModel.portHistoryFlow.collectAsStateWithLifecycle()
 
-    // Ensure system Back returns to the home tab (KEY_MAKER) when on secondary tabs
     if (uiState.currentTab != KitchenTab.KEY_MAKER) {
         BackHandler {
             viewModel.selectTab(KitchenTab.KEY_MAKER)
@@ -87,11 +86,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                     isRootAvailable = uiState.isRootAvailable,
                     isBusy = uiState.isBusy,
                     activeTaskTitle = uiState.activeTaskTitle,
+                    romForgePublicPath = uiState.romForgePublicPath,
+                    hasAllFilesAccess = uiState.hasAllFilesAccess,
                     binaries = uiState.extractedBinaries,
                     verificationSummary = uiState.verificationSummary,
                     alerts = alerts,
                     onToggleMode = viewModel::toggleExecutionMode,
-                    onRunVerifier = viewModel::runIntelligentCrossVerifier
+                    onRunVerifier = viewModel::runIntelligentCrossVerifier,
+                    onRefreshStorage = viewModel::refreshStorageStatusAndFolders
                 )
             },
             bottomBar = {
@@ -172,12 +174,20 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
 
                         KitchenTab.SIGN_PRO -> SignProScreen(
                             uiState = uiState,
+                            onSelectSignMode = viewModel::setSignProInputMode,
+                            onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
+                            onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
+                            onPickSingleApkUri = viewModel::pickSingleApkToSign,
+                            onSelectSingleApkRole = viewModel::setSingleApkRole,
+                            onSignSingleApk = viewModel::signSingleSelectedApk,
                             onSignAllInMemory = viewModel::signAllSystemApksInMemory
                         )
 
                         KitchenTab.GENERATOR -> GeneratorScreen(
                             uiState = uiState,
                             artCacheEntries = artCache,
+                            onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
+                            onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
                             onUpdateOptions = viewModel::updateGeneratorOptions,
                             onRunDex2oat = viewModel::runArtDex2oatGenerator,
                             onClearMd5Cache = viewModel::clearMd5ArtCache
@@ -185,6 +195,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
 
                         KitchenTab.COMPILER -> CompilerScreen(
                             uiState = uiState,
+                            onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
+                            onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
                             onUpdateOptions = viewModel::updateCompilerOptions,
                             onRunPreFlightAudit = viewModel::runPreFlightAudit,
                             onCompileImages = viewModel::compileFullSystemAndVbmeta,
