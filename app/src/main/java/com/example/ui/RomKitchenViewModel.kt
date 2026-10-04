@@ -479,9 +479,11 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             }
 
+            val currentKeys = repository.getAllKeys()
             val report = signProEngine.verifySignaturesAndExportReport(
                 targetDecompiledDir = targetDir,
                 singleApkFilter = singleTarget,
+                activeKeys = currentKeys,
                 keyDataDir = keyDataDir,
                 onLog = { appendLog(it) }
             )
@@ -575,6 +577,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             val sigReport = signProEngine.verifySignaturesAndExportReport(
                 targetDecompiledDir = targetDir,
                 singleApkFilter = null,
+                activeKeys = currentKeys,
                 keyDataDir = storageManager.getKeyDataReportsDir(),
                 onLog = { appendLog(it) }
             )
@@ -1037,7 +1040,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     fun runIntelligentCrossVerifier() {
         viewModelScope.launch {
             val activeDir = File(_uiState.value.selectedDecompiledImgFullPath)
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Exécution du Vérificateur Croisé Intelligent...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Audit Croisé AOSP sur UNPACK/${activeDir.name}...") }
             val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), activeDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
@@ -1045,6 +1048,59 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    /**
+     * One-click Zero-Bootloop Coherence Synchronizer for the currently selected unpacked `.img`:
+     * - Ensures RSA-2048 keys exist
+     * - Resigns all APKs in `UNPACK/<selected>` with STORED 4K alignment
+     * - Synchronizes `plat_mac_permissions.xml`, `privapp-permissions-*.xml`, `hiddenapi-package-whitelist.xml`, and `build.prop`
+     * - Repairs `plat_file_contexts` and `etc/fs_config` (`bin/init 0750`)
+     * - Re-runs the Cross-Verifier to reach 100% coherence score.
+     */
+    fun fixAllCoherenceAndBootloopRisksForUnpackedImg() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Harmonisation Totale & Anti-Bootloop sur UNPACK/${targetDir.name}..."
+                )
+            }
+            val currentKeys = ensureKeysAvailable(state)
+
+            val batchResult = signProEngine.signAllApksInMemoryAndPatchMacPermissions(
+                keys = currentKeys,
+                updateMacPerm = true,
+                targetDecompiledDir = targetDir,
+                onLog = { appendLog(it) }
+            )
+
+            val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
+                autoRepairBootloopRisks = true,
+                targetDecompiledDir = targetDir,
+                onLog = { appendLog(it) }
+            )
+
+            val updatedApks = signProEngine.scanSystemApks(targetDir)
+            val updatedMacXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
+            val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    scannedApks = updatedApks,
+                    lastBatchSignResult = batchResult,
+                    macPermissionsPreview = updatedMacXml,
+                    preFlightItems = preFlight,
                     verificationSummary = summary
                 )
             }

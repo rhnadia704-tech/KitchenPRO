@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -13,31 +17,43 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Policy
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,11 +65,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.modules.signpro.ApkSignTarget
+import com.example.modules.signpro.SignatureVerificationEntry
 import com.example.ui.KitchenUiState
 import com.example.ui.SignProInputMode
 import com.example.ui.components.DecompiledImgTargetSelectorCard
@@ -72,9 +91,16 @@ fun SignProScreen(
     onVerifyApkSignatures: (ApkSignTarget?) -> Unit,
     onSignAllInMemory: (Boolean) -> Unit
 ) {
+    val context = LocalContext.current
     var showMacXmlPreview by remember { mutableStateOf(false) }
+    var showFullVerificationDetails by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedCategoryFilter by remember { mutableStateOf("CORE_APPS") }
+    var expandedApkDetailsPath by remember { mutableStateOf<String?>(null) }
+
+    val verifiedEntriesByPath = remember(uiState.lastSignatureReport) {
+        uiState.lastSignatureReport?.entries?.associateBy { it.relativePath }.orEmpty()
+    }
 
     val filteredApks by remember(uiState.scannedApks, searchQuery, selectedCategoryFilter) {
         derivedStateOf {
@@ -123,12 +149,12 @@ fun SignProScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "MODULE 2 • SIGN PRO & AUDIT DE CONFIANCE",
+                                text = "MODULE 2 • SIGN PRO & INSPECTEUR DE CLÉS APK",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Resignez tous les APKs d'un système UNPACK, signez un APK précis sur place, ou exportez les rapports JSON/TXT dans KEY/Data",
+                                text = "Resignez un ou tous les APKs avec synchronisation XML intelligente (0 Bootloop), et inspectez la clé publique entière (HEX, PEM, SHA-256/SHA-1/MD5) de chaque APK",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -165,7 +191,7 @@ fun SignProScreen(
                 )
             }
 
-            // 2. Batch Sign + Signature Verification Report (KEY/Data)
+            // 2. Batch Sign + Complete Signature & Full Key Verification Report (KEY/Data)
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -173,7 +199,7 @@ fun SignProScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "2. Signature Globale & Audit des Signatures (-> KEY/Data)",
+                            text = "2. Signature Globale, Synchronisation XML & Extraction des Clés (-> KEY/Data)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -194,7 +220,10 @@ fun SignProScreen(
                             }
 
                             FilledTonalButton(
-                                onClick = { onVerifyApkSignatures(null) },
+                                onClick = {
+                                    showFullVerificationDetails = true
+                                    onVerifyApkSignatures(null)
+                                },
                                 enabled = !uiState.isBusy,
                                 modifier = Modifier
                                     .weight(1f)
@@ -202,7 +231,7 @@ fun SignProScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.VerifiedUser, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Vérifier (-> KEY/Data)")
+                                Text("Vérifier Tout (Clés)")
                             }
 
                             FilledTonalButton(
@@ -221,7 +250,7 @@ fun SignProScreen(
                             ) {
                                 Column(modifier = Modifier.padding(12.dp)) {
                                     Text(
-                                        text = "${res.signedSuccess}/${res.totalApks} APKs signés en ${res.elapsedMs}ms (${res.totalBytesProcessed / 1024} KB)",
+                                        text = "${res.signedSuccess}/${res.totalApks} APKs signés en ${res.elapsedMs}ms (${res.totalBytesProcessed / 1024} KB) + XMLs synchronisés",
                                         style = MaterialTheme.typography.labelMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -236,37 +265,101 @@ fun SignProScreen(
                             }
                         }
 
+                        // Complete Cryptographic Key & Signature Inspector Panel
                         uiState.lastSignatureReport?.let { rep ->
                             Surface(
-                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.75f),
-                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Default.Description,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Rapport de Vérification généré dans KEY/Data (${rep.validCount}/${rep.totalVerified} valides)",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                                        )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Key,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Column {
+                                                Text(
+                                                    text = if (rep.isSingleApkAudit && rep.entries.size == 1)
+                                                        "Clé & Signature Complète : ${rep.entries.first().apkName}"
+                                                    else
+                                                        "Audit Complet des Clés & Signatures (${rep.validCount}/${rep.totalVerified} APKs)",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                                Text(
+                                                    text = "Exporté dans KEY/Data : JSON & TXT complets",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            IconButton(
+                                                onClick = {
+                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Rapport Signatures APK", rep.fullTxtContent))
+                                                    Toast.makeText(context, "Rapport complet des clés copié !", Toast.LENGTH_SHORT).show()
+                                                },
+                                                modifier = Modifier.size(34.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.ContentCopy,
+                                                    contentDescription = "Copier toutes les clés",
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+
+                                            IconButton(
+                                                onClick = { showFullVerificationDetails = !showFullVerificationDetails },
+                                                modifier = Modifier.size(34.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (showFullVerificationDetails) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                                    contentDescription = "Afficher/Masquer les détails"
+                                                )
+                                            }
+                                        }
                                     }
+
                                     Text(
-                                        text = "JSON : ${rep.jsonReportPath}\nTXT  : ${rep.txtReportPath}",
+                                        text = "• JSON : ${rep.jsonReportPath}\n• TXT  : ${rep.txtReportPath}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        fontFamily = FontFamily.Monospace
                                     )
+
+                                    AnimatedVisibility(visible = showFullVerificationDetails) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 460.dp)
+                                                .verticalScroll(rememberScrollState()),
+                                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            rep.entries.forEachIndexed { idx, entry ->
+                                                FullApkKeyAndSignatureDetailCard(
+                                                    index = idx + 1,
+                                                    entry = entry,
+                                                    context = context
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -282,7 +375,13 @@ fun SignProScreen(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant
                         )
                     ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(14.dp)
+                        ) {
                             Text(
                                 text = "${uiState.selectedDecompiledImgFullPath}/etc/selinux/plat_mac_permissions.xml",
                                 style = MaterialTheme.typography.labelMedium,
@@ -290,11 +389,13 @@ fun SignProScreen(
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = uiState.macPermissionsPreview,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace
-                            )
+                            SelectionContainer {
+                                Text(
+                                    text = uiState.macPermissionsPreview,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
                     }
                 }
@@ -341,6 +442,9 @@ fun SignProScreen(
             }
 
             items(filteredApks, key = { it.relativePath }) { apk ->
+                val verifiedEntry = verifiedEntriesByPath[apk.relativePath]
+                val isExpanded = expandedApkDetailsPath == apk.relativePath
+
                 ElevatedCard(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -382,7 +486,7 @@ fun SignProScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
-                                        text = "Rôle SELinux : ${apk.detectedRole} • Partition : ${apk.partitionCategory} • ${apk.sizeBytes / 1024} KB",
+                                        text = "Rôle SELinux : ${apk.detectedRole} • Partition : ${apk.partitionCategory} • ${apk.sizeBytes / 1024} KB • SHA256: ${apk.certSha256Short}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary
                                     )
@@ -429,7 +533,7 @@ fun SignProScreen(
                             }
                         }
 
-                        // Per-APK Direct Actions: Sign ONLY this APK or Verify ONLY this APK (-> KEY/Data)
+                        // Per-APK Direct Actions: Sign ONLY this APK or Verify & Show Full Key of ONLY this APK
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -447,21 +551,41 @@ fun SignProScreen(
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Signer cet APK (${apk.detectedRole})", style = MaterialTheme.typography.labelSmall)
+                                Text("Signer (${apk.detectedRole})", style = MaterialTheme.typography.labelSmall)
                             }
 
                             OutlinedButton(
-                                onClick = { onVerifyApkSignatures(apk) },
+                                onClick = {
+                                    expandedApkDetailsPath = if (isExpanded && verifiedEntry != null) null else apk.relativePath
+                                    showFullVerificationDetails = true
+                                    onVerifyApkSignatures(apk)
+                                },
                                 enabled = !uiState.isBusy,
-                                modifier = Modifier.testTag("verify_single_unpack_apk_${apk.name}")
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("verify_single_unpack_apk_${apk.name}")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
+                                    imageVector = Icons.Default.Key,
                                     contentDescription = null,
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("Vérifier", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = if (isExpanded && verifiedEntry != null) "Masquer Clé" else "Voir Clé & Infos",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+
+                        // Inline Full Key & Signature Details directly inside the APK card when verified!
+                        AnimatedVisibility(visible = isExpanded && verifiedEntry != null) {
+                            verifiedEntry?.let { entry ->
+                                FullApkKeyAndSignatureDetailCard(
+                                    index = 1,
+                                    entry = entry,
+                                    context = context
+                                )
                             }
                         }
                     }
@@ -592,5 +716,208 @@ fun SignProScreen(
         }
 
         item { Spacer(modifier = Modifier.height(16.dp)) }
+    }
+}
+
+/**
+ * Displays the COMPLETE cryptographic key, digital signature, SHA-256 / SHA-1 / MD5 fingerprints,
+ * PEM certificate block, package metadata, SELinux `seinfo` domain, and ZIP alignment details for an APK.
+ */
+@Composable
+private fun FullApkKeyAndSignatureDetailCard(
+    index: Int,
+    entry: SignatureVerificationEntry,
+    context: Context
+) {
+    var showPemCertificate by remember { mutableStateOf(false) }
+
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "[#$index] ${entry.apkName} (${entry.packageName})",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Chemin : ${entry.relativePath} • ${entry.sizeBytes} octets (${entry.zipEntriesCount} entrées ZIP)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    AssistChip(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            val fullDump = buildString {
+                                appendLine("APK: ${entry.apkName} (${entry.packageName})")
+                                appendLine("Path: ${entry.absolutePath}")
+                                appendLine("Role: ${entry.assignedRole} | SELinux: ${entry.seinfoDomain}")
+                                appendLine("SharedUserId: ${entry.sharedUserId}")
+                                appendLine("Issuer: ${entry.certificateIssuer}")
+                                appendLine("SHA-256: ${entry.sha256DigestFull}")
+                                appendLine("SHA-1: ${entry.sha1DigestFull}")
+                                appendLine("MD5: ${entry.md5DigestFull}")
+                                appendLine("Public Key HEX (<signer signature>): ${entry.fullPublicKeyHex}")
+                                appendLine("Signature HEX (CERT.RSA): ${entry.fullCertSignatureHex}")
+                                appendLine(entry.fullCertificateBase64Pem)
+                            }
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("Clé APK ${entry.apkName}", fullDump))
+                            Toast.makeText(context, "Clé entière de ${entry.apkName} copiée !", Toast.LENGTH_SHORT).show()
+                        },
+                        label = { Text("Copier Clé", style = MaterialTheme.typography.labelSmall) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    )
+                }
+
+                HorizontalDivider()
+
+                // Complete Metadata Table
+                Text(
+                    text = "• Package & UID      : ${entry.packageName} | ${entry.sharedUserId}\n" +
+                            "• Partition & Rôle   : ${entry.partition} | Rôle Clé=${entry.assignedRole}\n" +
+                            "• Domaine SELinux    : ${entry.seinfoDomain}\n" +
+                            "• Émetteur X.509 DN  : ${entry.certificateIssuer}\n" +
+                            "• Algorithme & Clé   : ${entry.signatureAlgorithm} (${entry.keySizeBits} bits)\n" +
+                            "• En-tête MANIFEST   : ${entry.manifestMfHeaderSummary}\n" +
+                            "• Vérification APK   : Statut=${entry.status} | V1_JAR=${entry.v1JarVerified} | V2/V3=${entry.v2v3BlockPresent} | ARSC_STORED_4K=${entry.arscPageAligned}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 16.sp
+                )
+
+                // Complete Cryptographic Fingerprints (SHA-256, SHA-1, MD5)
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "EMPREINTES COMPLÈTES DU CERTIFICAT :",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "SHA-256 : ${entry.sha256DigestFull}\n" +
+                                    "SHA-1   : ${entry.sha1DigestFull}\n" +
+                                    "MD5     : ${entry.md5DigestFull}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.5.sp,
+                            lineHeight = 15.sp
+                        )
+                    }
+                }
+
+                // Full Public Key HEX Block (used in plat_mac_permissions.xml <signer signature="...">)
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            text = "CLÉ PUBLIQUE ENTIÈRE HEX (<signer signature=\"...\"> SELinux) :",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Text(
+                            text = entry.fullPublicKeyHex,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
+
+                // Full Digital Signature HEX Block (META-INF/CERT.RSA)
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            text = "SIGNATURE NUMÉRIQUE ENTIÈRE HEX (META-INF/CERT.RSA) :",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                        Text(
+                            text = entry.fullCertSignatureHex,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
+
+                // Toggleable Full X.509 PEM Base64 Certificate
+                AssistChip(
+                    onClick = { showPemCertificate = !showPemCertificate },
+                    label = {
+                        Text(
+                            text = if (showPemCertificate) "Masquer le Certificat X.509 PEM (Base64)"
+                            else "Afficher le Certificat X.509 PEM (Base64) Complet",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                )
+
+                if (showPemCertificate) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = entry.fullCertificateBase64Pem,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                }
+            }
+        }
     }
 }

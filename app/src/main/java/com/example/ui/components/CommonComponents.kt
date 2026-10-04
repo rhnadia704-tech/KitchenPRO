@@ -16,12 +16,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
@@ -80,6 +83,8 @@ fun TopSystemStatusBar(
     activeTaskTitle: String,
     romForgePublicPath: String,
     hasAllFilesAccess: Boolean,
+    availableDecompiledImgs: List<String>,
+    selectedDecompiledImgName: String,
     binaries: List<ExtractedBinary>,
     verificationSummary: CrossVerificationSummary?,
     alerts: List<VerificationAlertEntity>,
@@ -89,12 +94,15 @@ fun TopSystemStatusBar(
     onOpenDrawer: () -> Unit,
     onToggleConsoleTab: () -> Unit,
     onToggleMode: (ExecutionMode) -> Unit,
+    onSelectDecompiledImg: (String) -> Unit,
     onRunVerifier: () -> Unit,
+    onFixAllCoherence: () -> Unit,
     onRefreshStorage: () -> Unit
 ) {
     val context = LocalContext.current
     var showBinariesPanel by remember { mutableStateOf(false) }
     var showAlertsPanel by remember { mutableStateOf(false) }
+    var showVerifierImgDropdown by remember { mutableStateOf(false) }
 
     val allFilesSettingsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -383,7 +391,12 @@ fun TopSystemStatusBar(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
                 )
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
                     Text(
                         text = "Outils Natifs Statiques Extraits (chmod 0755)",
                         style = MaterialTheme.typography.labelMedium,
@@ -430,65 +443,189 @@ fun TopSystemStatusBar(
                     .fillMaxWidth()
                     .padding(top = 8.dp)
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                ) {
+                    // Header + Close / Re-run Audit
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "Analyseur & Vérificateur Croisé AOSP",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Analyseur & Vérificateur Croisé AOSP",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Audit exclusif de l'IMG décompilé (Zéro Bootloop)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         AssistChip(
                             onClick = onRunVerifier,
                             label = { Text("Relancer l'Audit", style = MaterialTheme.typography.labelSmall) },
                             modifier = Modifier.testTag("re_run_verifier_button")
                         )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    alerts.forEach { alert ->
-                        val badgeColor = when (alert.severity) {
-                            "CRITICAL" -> MaterialTheme.colorScheme.error
-                            "WARNING" -> MaterialTheme.colorScheme.tertiary
-                            else -> MaterialTheme.colorScheme.secondary
-                        }
-                        Row(
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Dropdown to select which unpacked .img in ROM_FORGE/UNPACK to audit
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedCard(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(badgeColor.copy(alpha = 0.08f))
-                                .padding(8.dp),
-                            verticalAlignment = Alignment.Top
+                                .clickable { showVerifierImgDropdown = true }
+                                .testTag("verifier_unpack_selector"),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(
-                                imageVector = if (alert.severity == "PASS") Icons.Default.CheckCircle else Icons.Default.Warning,
-                                contentDescription = alert.severity,
-                                tint = badgeColor,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "[${alert.module}] ${alert.title}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = badgeColor
-                                )
-                                Text(
-                                    text = alert.technicalDetail,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                if (!alert.resolved) {
-                                    Text(
-                                        text = "Action : ${alert.remediationCommand}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.primary
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.FolderOpen,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
                                     )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "IMG Décompilé Audité : UNPACK / $selectedDecompiledImgName",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Cliquer pour choisir un autre système dans ROM_FORGE/UNPACK",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = Icons.Default.ArrowDropDown,
+                                    contentDescription = "Changer d'IMG décompilé",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = showVerifierImgDropdown,
+                            onDismissRequest = { showVerifierImgDropdown = false }
+                        ) {
+                            availableDecompiledImgs.forEach { folder ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "UNPACK / $folder",
+                                            fontWeight = if (folder == selectedDecompiledImgName) FontWeight.ExtraBold else FontWeight.Normal
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = null,
+                                            tint = if (folder == selectedDecompiledImgName) MaterialTheme.colorScheme.secondary
+                                            else MaterialTheme.colorScheme.primary
+                                        )
+                                    },
+                                    onClick = {
+                                        showVerifierImgDropdown = false
+                                        onSelectDecompiledImg(folder)
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // One-Click Zero-Bootloop Harmonizer Button (signs APKs + synchronizes all XMLs + repairs fs_config/file_contexts)
+                    FilledTonalButton(
+                        onClick = onFixAllCoherence,
+                        enabled = !isBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("verifier_fix_all_coherence_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Harmoniser Clés, APKs & XMLs sur $selectedDecompiledImgName (0 Bootloop)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Scrollable Audit Items Container so the user can smoothly scroll through all checks!
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 310.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        alerts.forEach { alert ->
+                            val badgeColor = when (alert.severity) {
+                                "CRITICAL" -> MaterialTheme.colorScheme.error
+                                "WARNING" -> MaterialTheme.colorScheme.tertiary
+                                else -> MaterialTheme.colorScheme.secondary
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(badgeColor.copy(alpha = 0.08f))
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Icon(
+                                    imageVector = if (alert.severity == "PASS") Icons.Default.CheckCircle else Icons.Default.Warning,
+                                    contentDescription = alert.severity,
+                                    tint = badgeColor,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "[${alert.module}] ${alert.title}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = badgeColor
+                                    )
+                                    Text(
+                                        text = alert.technicalDetail,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    if (!alert.resolved) {
+                                        Text(
+                                            text = "Action : ${alert.remediationCommand}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
                         }

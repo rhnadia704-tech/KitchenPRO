@@ -133,17 +133,22 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
         drawerContent = {
             ModalDrawerSheet(
                 modifier = Modifier
+                    .fillMaxHeight()
                     .width(305.dp)
-                    .verticalScroll(rememberScrollState())
             ) {
-                // Sidebar Header
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                        .statusBarsPadding()
-                        .padding(18.dp)
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
                 ) {
+                    // Sidebar Header
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                            .statusBarsPadding()
+                            .padding(18.dp)
+                    ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
@@ -279,7 +284,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
             }
         }
     ) {
@@ -296,6 +302,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                         activeTaskTitle = uiState.activeTaskTitle,
                         romForgePublicPath = uiState.romForgePublicPath,
                         hasAllFilesAccess = uiState.hasAllFilesAccess,
+                        availableDecompiledImgs = uiState.availableDecompiledImgs,
+                        selectedDecompiledImgName = uiState.selectedDecompiledImgName,
                         binaries = uiState.extractedBinaries,
                         verificationSummary = uiState.verificationSummary,
                         alerts = alerts,
@@ -305,7 +313,9 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                         onOpenDrawer = { coroutineScope.launch { drawerState.open() } },
                         onToggleConsoleTab = viewModel::toggleConsoleTab,
                         onToggleMode = viewModel::toggleExecutionMode,
+                        onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
                         onRunVerifier = viewModel::runIntelligentCrossVerifier,
+                        onFixAllCoherence = viewModel::fixAllCoherenceAndBootloopRisksForUnpackedImg,
                         onRefreshStorage = viewModel::refreshStorageStatusAndFolders
                     )
                 },
