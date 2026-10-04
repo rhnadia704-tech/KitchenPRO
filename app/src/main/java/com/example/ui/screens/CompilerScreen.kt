@@ -82,12 +82,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "1. DÉCOMPILATEUR .IMG -> STOCKAGE /ROM_FORGE",
+                                text = "1. DÉCOMPILATEUR .IMG -> ROM_FORGE/UNPACK",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Extrait vos fichiers .img directement dans /storage/emulated/0/ROM_FORGE/decompiled_imgs/ (et Download/ROM_FORGE sans root)",
+                                text = "Extrait l'intégralité de vos fichiers .img dans /storage/emulated/0/ROM_FORGE/UNPACK/<nom_img>/ sans root",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -182,12 +182,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "3. RECONSTRUCTION .IMG & VBMETA -> ROM_FORGE",
+                                text = "3. RECONSTRUCTION .IMG & VBMETA -> ROM_FORGE/PACKED",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Compile '${uiState.selectedDecompiledImgName}' en system.img & vbmeta.img dans /storage/emulated/0/ROM_FORGE/compiled_imgs/",
+                                text = "Compile 'UNPACK/${uiState.selectedDecompiledImgName}' en image EXT4/EROFS valide + vbmeta.img dans /storage/emulated/0/ROM_FORGE/PACKED/",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

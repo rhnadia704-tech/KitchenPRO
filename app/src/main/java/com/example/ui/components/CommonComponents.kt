@@ -12,25 +12,25 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -39,12 +39,16 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -82,6 +86,7 @@ fun TopSystemStatusBar(
     logsCount: Int,
     latestLogEntry: TerminalLogEntry?,
     isConsoleTabSelected: Boolean,
+    onOpenDrawer: () -> Unit,
     onToggleConsoleTab: () -> Unit,
     onToggleMode: (ExecutionMode) -> Unit,
     onRunVerifier: () -> Unit,
@@ -101,7 +106,8 @@ fun TopSystemStatusBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .statusBarsPadding()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -112,29 +118,30 @@ fun TopSystemStatusBar(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.weight(1f)
             ) {
-                Box(
+                IconButton(
+                    onClick = onOpenDrawer,
                     modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
+                        .size(40.dp)
+                        .testTag("open_sidebar_drawer_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Memory,
-                        contentDescription = "ROM Forge Engine",
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Menu Latéral ROM Forge",
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Spacer(modifier = Modifier.width(6.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "ROM FORGE • AOSP KITCHEN",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = romForgePublicPath,
+                        text = "$romForgePublicPath/{UNPACK,PACKED,KEY,PORT}",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.primary,
@@ -148,7 +155,6 @@ fun TopSystemStatusBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Dedicated Console & History Quick Switch Pill
                 Surface(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
@@ -171,7 +177,7 @@ fun TopSystemStatusBar(
                         Spacer(modifier = Modifier.width(5.dp))
                         Icon(
                             imageVector = Icons.Default.Terminal,
-                            contentDescription = "Volet Console & Historique",
+                            contentDescription = "Volet Console & Terminal",
                             tint = if (isConsoleTabSelected) MaterialTheme.colorScheme.onPrimary
                             else Color(0xFF00E5FF),
                             modifier = Modifier.size(15.dp)
@@ -187,7 +193,6 @@ fun TopSystemStatusBar(
                     }
                 }
 
-                // Cross-Verifier Score Badge
                 val score = verificationSummary?.score ?: 100
                 val scoreColor = when {
                     score >= 90 -> MaterialTheme.colorScheme.secondary
@@ -224,7 +229,6 @@ fun TopSystemStatusBar(
             }
         }
 
-        // Optional All Files Access shortcut on Android 11+ if not yet granted
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess) {
             Spacer(modifier = Modifier.height(4.dp))
             Surface(
@@ -288,7 +292,6 @@ fun TopSystemStatusBar(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // Hybrid Mode Selector + Static Binaries Pill
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -349,7 +352,6 @@ fun TopSystemStatusBar(
             )
         }
 
-        // Compact 1-line progress banner during active operations (replaces bulky bottom console)
         if (isBusy) {
             Spacer(modifier = Modifier.height(4.dp))
             LinearProgressIndicator(
@@ -372,7 +374,6 @@ fun TopSystemStatusBar(
             }
         }
 
-        // Expandable Static ARM64 Binaries Drawer
         AnimatedVisibility(visible = showBinariesPanel) {
             Card(
                 modifier = Modifier
@@ -423,7 +424,6 @@ fun TopSystemStatusBar(
             }
         }
 
-        // Expandable Intelligent Cross-Verifier Alerts Drawer
         AnimatedVisibility(visible = showAlertsPanel) {
             ElevatedCard(
                 modifier = Modifier
@@ -499,7 +499,10 @@ fun TopSystemStatusBar(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * Dropdown Menu Selector for choosing which unpacked `.img` system inside `ROM_FORGE/UNPACK/`
+ * to process in Sign Pro, Generator, Compiler, or Auto-Porter.
+ */
 @Composable
 fun DecompiledImgTargetSelectorCard(
     title: String,
@@ -509,6 +512,8 @@ fun DecompiledImgTargetSelectorCard(
     onSelectFolder: (String) -> Unit,
     onPickExternalSafTree: (Uri?) -> Unit
 ) {
+    var expanded by remember { mutableStateOf(false) }
+
     val folderTreePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
@@ -558,33 +563,87 @@ fun DecompiledImgTargetSelectorCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Choisir Dossier", style = MaterialTheme.typography.labelSmall)
+                    Text("Importer Dossier", style = MaterialTheme.typography.labelSmall)
                 }
             }
 
-            Text(
-                text = "Dossier actif : $selectedFullPath",
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.primary
-            )
-
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                availableFolders.forEach { folder ->
-                    FilterChip(
-                        selected = folder == selectedFolderName,
-                        onClick = { onSelectFolder(folder) },
-                        label = {
+            // Dropdown Selector Box for UNPACK systems
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expanded = true }
+                        .testTag("unpack_dropdown_selector"),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "IMG: $folder",
-                                style = MaterialTheme.typography.labelSmall
+                                text = "Système Décompilé (UNPACK) : $selectedFolderName",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
                             )
-                        },
-                        modifier = Modifier.testTag("decompiled_img_chip_$folder")
-                    )
+                            Text(
+                                text = selectedFullPath,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = "Choisir le système dans UNPACK",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    modifier = Modifier.fillMaxWidth(0.88f)
+                ) {
+                    availableFolders.forEach { folder ->
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text(
+                                        text = "UNPACK / $folder",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = if (folder == selectedFolderName) FontWeight.ExtraBold else FontWeight.Normal
+                                    )
+                                    Text(
+                                        text = "/storage/emulated/0/ROM_FORGE/UNPACK/$folder",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Folder,
+                                    contentDescription = null,
+                                    tint = if (folder == selectedFolderName) MaterialTheme.colorScheme.secondary
+                                    else MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = {
+                                expanded = false
+                                onSelectFolder(folder)
+                            },
+                            modifier = Modifier.testTag("decompiled_img_chip_$folder")
+                        )
+                    }
                 }
             }
         }

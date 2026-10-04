@@ -35,7 +35,12 @@ class KeyMakerEngine(private val filesDir: File) {
         AospKeySpec("testkey", "Clé par défaut pour packages AOSP génériques (default)", "default")
     )
 
-    fun getKeystoreDir(): File = File(filesDir, "keystore_aosp").apply { mkdirs() }
+    fun getKeystoreDir(): File = File(filesDir, "KEY").apply {
+        mkdirs()
+        File(this, "Data").mkdirs()
+    }
+
+    fun getKeyDataDir(): File = File(getKeystoreDir(), "Data").apply { mkdirs() }
 
     fun getManifestJsonFile(): File = File(getKeystoreDir(), "manifest.json")
 

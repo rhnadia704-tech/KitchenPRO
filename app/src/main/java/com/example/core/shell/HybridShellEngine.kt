@@ -52,9 +52,8 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
 
     suspend fun probeRootAccess(): Boolean = withContext(Dispatchers.IO) {
         try {
-            val standardSuPaths = listOf("/system/bin/su", "/system/xbin/su")
-            val binaryExists = standardSuPaths.any { File(it).exists() }
-            if (!binaryExists) {
+            val buildTags = android.os.Build.TAGS ?: ""
+            if (!buildTags.contains("test-keys") && !File("/system/bin/su").exists()) {
                 isRootAvailableOnDevice = false
                 return@withContext false
             }

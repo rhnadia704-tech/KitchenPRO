@@ -23,7 +23,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ClearAll
@@ -31,8 +34,10 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -62,6 +67,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.local.PortHistoryEntity
@@ -74,12 +80,15 @@ fun ConsoleHistoryScreen(
     uiState: KitchenUiState,
     portHistory: List<PortHistoryEntity>,
     onClearLogs: () -> Unit,
+    onExecuteCommand: (String) -> Unit,
+    onSaveLogsToTxt: () -> Unit,
     onSelectDecompiledImgAndNavigate: (String, KitchenTab) -> Unit
 ) {
     val context = LocalContext.current
-    var selectedSubTab by remember { mutableIntStateOf(0) } // 0 = Console Temps-Réel, 1 = Historique & Dossiers ROM_FORGE
+    var selectedSubTab by remember { mutableIntStateOf(0) } // 0 = Terminal & Logs Live, 1 = Dossiers UNPACK / PORT & Historique
     var selectedLevelFilter by remember { mutableStateOf("ALL") }
     var searchQuery by remember { mutableStateOf("") }
+    var commandInput by remember { mutableStateOf("") }
     var autoScroll by remember { mutableStateOf(true) }
 
     val filteredLogs by remember(uiState.terminalLogs, selectedLevelFilter, searchQuery) {
@@ -116,32 +125,32 @@ fun ConsoleHistoryScreen(
             Tab(
                 selected = selectedSubTab == 0,
                 onClick = { selectedSubTab = 0 },
-                text = { Text("Console Shell (${uiState.terminalLogs.size})") },
+                text = { Text("Terminal & Logs Live (${uiState.terminalLogs.size})") },
                 icon = { Icon(imageVector = Icons.Default.Terminal, contentDescription = null) },
                 modifier = Modifier.testTag("subtab_console_logs")
             )
             Tab(
                 selected = selectedSubTab == 1,
                 onClick = { selectedSubTab = 1 },
-                text = { Text("Historique & IMG (${uiState.availableDecompiledImgs.size})") },
+                text = { Text("Espaces UNPACK & PORT (${uiState.availableDecompiledImgs.size})") },
                 icon = { Icon(imageVector = Icons.Default.History, contentDescription = null) },
                 modifier = Modifier.testTag("subtab_history_imgs")
             )
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (selectedSubTab == 0) {
-            // Filter & Search Controls
+            // Search, Copy & Save as .TXT Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("Filtrer les logs (ex: EXT4, APK, FOD)...") },
+                    placeholder = { Text("Filtrer les logs (EXT4, APK, FOD)...") },
                     leadingIcon = { Icon(imageVector = Icons.Default.Search, contentDescription = null) },
                     singleLine = true,
                     modifier = Modifier
@@ -162,6 +171,16 @@ fun ConsoleHistoryScreen(
                 }
 
                 IconButton(
+                    onClick = {
+                        onSaveLogsToTxt()
+                        Toast.makeText(context, "Journal enregistré en .txt dans KEY/Data", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.testTag("save_logs_txt_button")
+                ) {
+                    Icon(imageVector = Icons.Default.Save, contentDescription = "Enregistrer en format .txt")
+                }
+
+                IconButton(
                     onClick = onClearLogs,
                     modifier = Modifier.testTag("clear_terminal_button")
                 ) {
@@ -169,11 +188,22 @@ fun ConsoleHistoryScreen(
                 }
             }
 
+            if (uiState.lastSavedLogFilePath.isNotEmpty()) {
+                Text(
+                    text = "Dernier export TXT : ${uiState.lastSavedLogFilePath}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+
             Spacer(modifier = Modifier.height(6.dp))
 
+            // Level Filters + Quick Shell Shortcuts
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 val levels = listOf(
@@ -197,16 +227,29 @@ fun ConsoleHistoryScreen(
                     onClick = { autoScroll = !autoScroll },
                     label = { Text("Auto-Scroll", style = MaterialTheme.typography.labelSmall) }
                 )
+
+                val quickCmds = listOf("ls", "ls unpack", "ls packed", "ls key", "ls port", "getprop", "verify-apks")
+                quickCmds.forEach { qCmd ->
+                    AssistChip(
+                        onClick = { onExecuteCommand(qCmd) },
+                        label = {
+                            Text(
+                                text = "$ $qCmd",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Full-Height Smooth Terminal Log View
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
-                    .padding(bottom = 12.dp),
+                    .weight(1f),
                 color = Color(0xFF090D16),
                 shape = RoundedCornerShape(14.dp)
             ) {
@@ -216,10 +259,11 @@ fun ConsoleHistoryScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Aucun log correspondant au filtre actuel.",
+                            text = "Terminal prêt. Saisissez une commande ci-dessous (ex: help, ls unpack, avbtool --version).",
                             color = Color(0xFF64748B),
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(16.dp)
                         )
                     }
                 } else {
@@ -231,10 +275,11 @@ fun ConsoleHistoryScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         items(filteredLogs, key = { it.id }) { entry ->
-                            val lineColor = when (entry.level) {
-                                "ERROR" -> Color(0xFFF87171)
-                                "WARN" -> Color(0xFFFBBF24)
-                                "SUCCESS" -> Color(0xFF34D399)
+                            val lineColor = when {
+                                entry.message.startsWith("$ ") -> Color(0xFF00E5FF)
+                                entry.level == "ERROR" -> Color(0xFFF87171)
+                                entry.level == "WARN" -> Color(0xFFFBBF24)
+                                entry.level == "SUCCESS" -> Color(0xFF34D399)
                                 else -> Color(0xFF93C5FD)
                             }
                             Row(
@@ -261,15 +306,88 @@ fun ConsoleHistoryScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Interactive Terminal Command Input Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = commandInput,
+                    onValueChange = { commandInput = it },
+                    placeholder = {
+                        Text(
+                            text = "Commande shell (ex: ls unpack, getprop ro.board.platform, avbtool, help)...",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = {
+                            if (commandInput.isNotBlank()) {
+                                onExecuteCommand(commandInput)
+                                commandInput = ""
+                            }
+                        }
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("terminal_command_input")
+                )
+
+                FilledTonalButton(
+                    onClick = {
+                        if (commandInput.isNotBlank()) {
+                            onExecuteCommand(commandInput)
+                            commandInput = ""
+                        }
+                    },
+                    modifier = Modifier.testTag("terminal_send_command_button")
+                ) {
+                    Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = "Exécuter")
+                }
+            }
         } else {
-            // Sub-Tab 2: Decompiled IMG History & Quick Actions
+            // Sub-Tab 2: Structured Workspace Overview (UNPACK, PACKED, KEY, PORT)
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "Architecture des Dossiers ROM_FORGE",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "• UNPACK/   : Systèmes .img décompilés prêts à modifier\n" +
+                                        "• PACKED/   : Images system.img & vbmeta.img recompilées\n" +
+                                        "• KEY/      : Clés RSA-2048 (.pk8/.x509.pem) & manifest.json\n" +
+                                        "• KEY/Data/ : Rapports JSON & TXT des signatures vérifiées\n" +
+                                        "• PORT/     : Espace de portage GSI + Blobs FOD + Image portée finale",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+
+                item {
                     Text(
-                        text = "Images .IMG Décompilées dans /storage/emulated/0/ROM_FORGE/decompiled_imgs",
+                        text = "Systèmes Décompilés dans ROM_FORGE/UNPACK (${uiState.availableDecompiledImgs.size})",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
@@ -297,12 +415,12 @@ fun ConsoleHistoryScreen(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Column {
                                         Text(
-                                            text = folderName,
+                                            text = "UNPACK / $folderName",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontWeight = FontWeight.ExtraBold
                                         )
                                         Text(
-                                            text = "${uiState.romForgePublicPath}/decompiled_imgs/$folderName",
+                                            text = "${uiState.romForgePublicPath}/UNPACK/$folderName",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = FontFamily.Monospace,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -334,11 +452,7 @@ fun ConsoleHistoryScreen(
                                     onClick = { onSelectDecompiledImgAndNavigate(folderName, KitchenTab.SIGN_PRO) },
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Bolt,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    Icon(imageVector = Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("Sign Pro", style = MaterialTheme.typography.labelSmall)
                                 }
@@ -347,11 +461,7 @@ fun ConsoleHistoryScreen(
                                     onClick = { onSelectDecompiledImgAndNavigate(folderName, KitchenTab.GENERATOR) },
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Memory,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    Icon(imageVector = Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("Generator", style = MaterialTheme.typography.labelSmall)
                                 }
@@ -360,11 +470,7 @@ fun ConsoleHistoryScreen(
                                     onClick = { onSelectDecompiledImgAndNavigate(folderName, KitchenTab.COMPILER) },
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Build,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    Icon(imageVector = Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text("Compiler", style = MaterialTheme.typography.labelSmall)
                                 }
@@ -377,7 +483,7 @@ fun ConsoleHistoryScreen(
                     item {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Historique des Portages GSI (${portHistory.size})",
+                            text = "Historique des Portages GSI dans ROM_FORGE/PORT (${portHistory.size})",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )

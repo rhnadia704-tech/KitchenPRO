@@ -84,25 +84,34 @@ class AssetBinaryManager(
         }
 
     /**
-     * Initializes the public `/storage/emulated/0/ROM_FORGE/` directory structure
-     * (`decompiled_imgs/system_ext4`, `decompiled_imgs/stock_vendor_ref`, `signed_apks`, `compiled_imgs`, `keystore_aosp`)
-     * and mirrors it to `Download/ROM_FORGE` if Android 11+ All Files Access is not yet granted.
+     * Initializes the structured `/storage/emulated/0/ROM_FORGE/` directory tree:
+     * - `UNPACK/system_ext4` (Decompiled .img systems)
+     * - `PACKED/` (Compiled .img & vbmeta.img)
+     * - `KEY/` & `KEY/Data/` (RSA-2048 keys, manifest.json, and signature verification reports)
+     * - `PORT/` (GSI-to-System porting workspace & Xiaomi Tucana SM6150 reference blobs)
      */
     suspend fun initializePublicRomForgeTree(onLog: (String) -> Unit) = withContext(Dispatchers.IO) {
-        val decompiledRoot = storageManager.getExtractedImagesRoot()
-        val systemRoot = File(decompiledRoot, "system_ext4")
-        val LegacyLink = File(getWorkspaceDir(), "system_ext4")
+        val unpackRoot = storageManager.getUnpackRootDir()
+        val systemRoot = File(unpackRoot, "system_ext4")
+        val legacyLink = File(getWorkspaceDir(), "system_ext4")
 
         populateDecompiledImgStructure(systemRoot, "system_ext4")
-        // Keep root-level alias `ROM_FORGE/system_ext4` synchronized as well
-        if (LegacyLink.absolutePath != systemRoot.absolutePath && !File(LegacyLink, "build.prop").exists()) {
-            populateDecompiledImgStructure(LegacyLink, "system_ext4")
+        if (legacyLink.absolutePath != systemRoot.absolutePath && !File(legacyLink, "build.prop").exists()) {
+            populateDecompiledImgStructure(legacyLink, "system_ext4")
         }
 
-        val stockVendor = File(getWorkspaceDir(), "stock_vendor_ref")
-        populateStockVendorReference(stockVendor)
+        storageManager.getPackedOutputImagesDir()
+        storageManager.getKeyRootDir()
+        storageManager.getKeyDataReportsDir()
 
-        onLog("[ROM_FORGE] Dossier principal initialisé : ${storageManager.getUserVisibleDisplayRoot()}/decompiled_imgs/system_ext4")
+        val stockVendorInPort = storageManager.getStockVendorDecompiledDir()
+        populateStockVendorReference(stockVendorInPort)
+        val stockVendorLegacy = File(getWorkspaceDir(), "stock_vendor_ref")
+        if (stockVendorLegacy.absolutePath != stockVendorInPort.absolutePath) {
+            populateStockVendorReference(stockVendorLegacy)
+        }
+
+        onLog("[ROM_FORGE] Structure organisée prête : UNPACK, PACKED, KEY (KEY/Data) et PORT dans ${storageManager.getUserVisibleDisplayRoot()}")
     }
 
     fun populateDecompiledImgStructure(targetDir: File, imgLabel: String) {

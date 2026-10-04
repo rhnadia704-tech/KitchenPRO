@@ -550,10 +550,10 @@ class Ext4UserspaceExtractor {
                 fileContextsLines.add("/$relPath $ctx")
             }
 
-            val dirBytes = readInodePayloadToMemory(dirInode, maxBytes = 4 * 1024 * 1024)
+            val dirBytes = readInodePayloadToMemory(dirInode, maxBytes = 16 * 1024 * 1024)
             val db = ByteBuffer.wrap(dirBytes).order(ByteOrder.LITTLE_ENDIAN)
 
-            // Parse ext4_dir_entry_2 block by block
+            // Parse ext4_dir_entry_2 block by block (supports both linear and HTree dx_root/dx_node blocks)
             var blockOffset = 0
             while (blockOffset < dirBytes.size) {
                 val blockEnd = min(blockOffset + blockSize, dirBytes.size)
@@ -564,12 +564,15 @@ class Ext4UserspaceExtractor {
                     val nameLen = db.get(pos + 6).toInt() and 0xFF
                     val fileType = db.get(pos + 7).toInt() and 0xFF
 
-                    if (recLen < 8 || pos + recLen > blockEnd) break
+                    if (recLen < 8 || (recLen % 4 != 0) || pos + recLen > blockEnd) break
 
-                    if (childInodeNum > 0L && nameLen > 0 && pos + 8 + nameLen <= blockEnd) {
+                    // HTree dx_node / dx_tail pseudo-entry check (inode == 0 && nameLen == 0)
+                    if (childInodeNum > 0L && childInodeNum <= inodesCount && nameLen in 1..255 && pos + 8 + nameLen <= blockEnd) {
                         val rawName = String(dirBytes, pos + 8, nameLen, Charsets.UTF_8)
-                        val cleanName = rawName.replace("/", "_")
-                        if (cleanName != "." && cleanName != ".." && cleanName != "lost+found") {
+                        // Ignore non-printable binary HTree hash table buckets
+                        val isPrintable = rawName.all { ch -> ch.code in 32..126 || ch.code > 160 }
+                        val cleanName = rawName.replace("/", "_").trim('\u0000')
+                        if (isPrintable && cleanName.isNotEmpty() && cleanName != "." && cleanName != ".." && cleanName != "lost+found") {
                             val childRelPath = if (relPath.isEmpty()) cleanName else "$relPath/$cleanName"
                             val childInode = readInode(childInodeNum)
 

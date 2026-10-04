@@ -31,6 +31,7 @@ import com.example.modules.porter.VirtualDeviceTreePortResult
 import com.example.modules.signpro.ApkSignTarget
 import com.example.modules.signpro.BatchSignResult
 import com.example.modules.signpro.SignProEngine
+import com.example.modules.signpro.SignatureVerificationReport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -52,11 +53,12 @@ enum class KitchenTab(val route: String, val label: String) {
     GENERATOR("generator", "Generator"),
     COMPILER("compiler", "Compilation"),
     AUTO_PORTER("auto_porter", "Porting (GSI to System)"),
-    CONSOLE("console", "Console & Historique")
+    CONSOLE("console", "Console & Terminal"),
+    HELP("help", "Aides & Commandes")
 }
 
 enum class SignProInputMode(val label: String) {
-    DECOMPILED_IMG_FOLDER("IMG Décompilé (Tous les APKs)"),
+    DECOMPILED_IMG_FOLDER("IMG Décompilé (UNPACK)"),
     SINGLE_STANDALONE_APK("APK Individuel (.apk)")
 }
 
@@ -81,7 +83,7 @@ data class KitchenUiState(
     val hasAllFilesAccess: Boolean = false,
     val availableDecompiledImgs: List<String> = listOf("system_ext4"),
     val selectedDecompiledImgName: String = "system_ext4",
-    val selectedDecompiledImgFullPath: String = "/storage/emulated/0/ROM_FORGE/decompiled_imgs/system_ext4",
+    val selectedDecompiledImgFullPath: String = "/storage/emulated/0/ROM_FORGE/UNPACK/system_ext4",
     // Key Maker state
     val keyOrg: String = "LineageOS-Custom-Forge",
     val keyCommonName: String = "AOSP-Security-Chain",
@@ -96,6 +98,7 @@ data class KitchenUiState(
     val lastSingleSignedApkOutPath: String = "",
     val scannedApks: List<ApkSignTarget> = emptyList(),
     val lastBatchSignResult: BatchSignResult? = null,
+    val lastSignatureReport: SignatureVerificationReport? = null,
     val macPermissionsPreview: String = "",
     // Generator state
     val selectedCompilerFilter: String = "speed-profile",
@@ -103,7 +106,7 @@ data class KitchenUiState(
     val enableFsVerity: Boolean = true,
     val lastArtReport: ArtGenerationReport? = null,
     // Compiler state
-    val selectedFsFormat: FilesystemFormat = FilesystemFormat.EROFS,
+    val selectedFsFormat: FilesystemFormat = FilesystemFormat.EXT4,
     val enableDmVerity: Boolean = true,
     val disableVerityFlagsInVbmeta: Boolean = false,
     val preFlightItems: List<PreFlightAuditItem> = emptyList(),
@@ -112,7 +115,9 @@ data class KitchenUiState(
     // Auto-Porter state
     val portAnalysisResult: VirtualDeviceTreePortResult? = null,
     // Cross-Verifier summary
-    val verificationSummary: CrossVerificationSummary? = null
+    val verificationSummary: CrossVerificationSummary? = null,
+    // Console saved path
+    val lastSavedLogFilePath: String = ""
 )
 
 class RomKitchenViewModel(application: Application) : AndroidViewModel(application) {
@@ -126,7 +131,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         binDir = assetBinaryManager.getBinDir(),
         workspaceDir = assetBinaryManager.getWorkspaceDir()
     )
-    private val keyMakerEngine = KeyMakerEngine(storageManager.getKeystorePublicDir().parentFile ?: application.filesDir)
+    private val keyMakerEngine = KeyMakerEngine(storageManager.getRomForgePublicRoot())
     private val signProEngine = SignProEngine(assetBinaryManager.getWorkspaceDir(), keyMakerEngine)
     private val artGeneratorEngine = ArtGeneratorEngine(
         defaultWorkspaceDir = assetBinaryManager.getWorkspaceDir(),
@@ -186,7 +191,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun bootstrapEnvironment() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Initialisation du dossier public ROM_FORGE & binaires ARM64...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Initialisation de ROM_FORGE (UNPACK, PACKED, KEY, PORT)...") }
             val binaries = assetBinaryManager.extractAndVerifyBinaries { appendLog(it) }
             val rootDetected = shellEngine.probeRootAccess()
             val mode = if (rootDetected) ExecutionMode.ROOT_LOOPBACK else ExecutionMode.NON_ROOT_USERSPACE
@@ -203,10 +208,10 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 autoRepairBootloopRisks = false,
                 targetDecompiledDir = activeDir
             ) { appendLog(it) }
-            val portInit = autoPorterEngine.analyzeStockAndGsiTrees { appendLog(it) }
+            val portInit = autoPorterEngine.analyzeStockAndGsiTrees(activeDir) { appendLog(it) }
 
             val activeKeys = repository.getAllKeys()
-            val verifierSummary = crossVerifierEngine.runFullDiagnostic(activeKeys) { appendLog(it) }
+            val verifierSummary = crossVerifierEngine.runFullDiagnostic(activeKeys, activeDir) { appendLog(it) }
             repository.clearAlerts()
             verifierSummary.alerts.forEach { repository.addAlert(it) }
 
@@ -264,13 +269,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleExecutionMode(mode: ExecutionMode) {
         shellEngine.setExecutionMode(mode)
-        appendLog("[MODE-SWITCH] Basculement vers ${mode.name} (Dossier actif : ${_uiState.value.romForgePublicPath})")
+        appendLog("[MODE-SWITCH] Basculement vers ${mode.name} (Espace actif : ${_uiState.value.romForgePublicPath})")
         _uiState.update { it.copy(executionMode = mode) }
     }
 
     fun selectDecompiledImgFolder(folderName: String) {
         viewModelScope.launch {
-            val targetDir = File(storageManager.getExtractedImagesRoot(), folderName)
+            val targetDir = File(storageManager.getUnpackRootDir(), folderName)
             if (!targetDir.exists() || (targetDir.listFiles()?.isEmpty() == true)) {
                 assetBinaryManager.populateDecompiledImgStructure(targetDir, folderName)
             }
@@ -280,15 +285,17 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 autoRepairBootloopRisks = false,
                 targetDecompiledDir = targetDir
             ) { appendLog(it) }
+            val portAnalysis = autoPorterEngine.analyzeStockAndGsiTrees(targetDir) { appendLog(it) }
 
-            appendLog("[IMG-TARGET] Image décompilée sélectionnée : ${targetDir.absolutePath} (${apks.size} APKs)")
+            appendLog("[UNPACK-SELECT] Système décompilé sélectionné : UNPACK/${targetDir.name} (${apks.size} APKs détectés)")
             _uiState.update {
                 it.copy(
                     selectedDecompiledImgName = targetDir.name,
                     selectedDecompiledImgFullPath = targetDir.absolutePath,
                     scannedApks = apks,
                     macPermissionsPreview = macXml,
-                    preFlightItems = preFlight
+                    preFlightItems = preFlight,
+                    portAnalysisResult = portAnalysis
                 )
             }
         }
@@ -297,7 +304,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     fun selectCustomDecompiledDirectoryUri(treeUri: Uri?) {
         if (treeUri == null) return
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Liaison du dossier IMG décompilé...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Liaison du dossier UNPACK...") }
             storageManager.saveCustomSafTreeUri(treeUri)
             val resolvedDir = storageManager.resolveOrImportSafDirectory(
                 treeUri = treeUri,
@@ -339,7 +346,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     fun generateAospKeySuite() {
         viewModelScope.launch {
             val state = _uiState.value
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Génération RSA-2048 dans ROM_FORGE/keystore_aosp...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Génération RSA-2048 dans ROM_FORGE/KEY...") }
             val generated = keyMakerEngine.generateFullKeySuite(
                 organization = state.keyOrg.ifBlank { "LineageOS-Forge" },
                 commonName = state.keyCommonName.ifBlank { "AOSP-Master" },
@@ -352,12 +359,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             storageManager.mirrorDirectoryToPublicDownloadRomForge(
                 sourceDir = keyMakerEngine.getKeystoreDir(),
-                subFolderName = "keystore_aosp",
+                subFolderName = "KEY",
                 onLog = { appendLog(it) }
             )
 
             val cleJson = keyMakerEngine.readCleNoteManifestJson()
-            val summary = crossVerifierEngine.runFullDiagnostic(generated) { appendLog(it) }
+            val activeDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            val summary = crossVerifierEngine.runFullDiagnostic(generated, activeDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
@@ -406,7 +414,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 if (!targetInputApk.exists()) {
                     assetBinaryManager.createMinimalSampleApk(targetInputApk, "com.custom.systemapp", "platform")
                 }
-                appendLog("[SIGN-PRO-APK] APK sélectionné depuis ROM_FORGE : ${targetInputApk.absolutePath}")
+                appendLog("[SIGN-PRO-APK] APK sélectionné : ${targetInputApk.absolutePath}")
             }
 
             val autoRole = signProEngine.detectOptimalKeyRole(targetInputApk)
@@ -420,23 +428,96 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Signs ONLY the selected APK inside the unpacked `.img` directory (`in-place`)
+     * without signing all other APKs.
+     */
+    fun signSingleApkInDecompiledSystem(apkTarget: ApkSignTarget) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Signature de l'APK uniquement : ${apkTarget.name}..."
+                )
+            }
+
+            val currentKeys = ensureKeysAvailable(state)
+            signProEngine.signSingleApkInDecompiledSystem(
+                apkTarget = apkTarget,
+                keys = currentKeys,
+                onLog = { appendLog(it) }
+            )
+
+            val updatedApks = signProEngine.scanSystemApks(targetDir)
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    scannedApks = updatedApks
+                )
+            }
+        }
+    }
+
+    /**
+     * Verifies the cryptographic signature of either a single APK (`singleTarget != null`)
+     * or all APKs in the unpacked system (`singleTarget == null`), and exports JSON + TXT reports to `ROM_FORGE/KEY/Data/`.
+     */
+    fun verifyApkSignaturesAndExportReports(singleTarget: ApkSignTarget? = null) {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            val keyDataDir = storageManager.getKeyDataReportsDir()
+            val label = singleTarget?.name ?: "Tous les APKs (${targetDir.name})"
+
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Audit de signature sur $label -> KEY/Data..."
+                )
+            }
+
+            val report = signProEngine.verifySignaturesAndExportReport(
+                targetDecompiledDir = targetDir,
+                singleApkFilter = singleTarget,
+                keyDataDir = keyDataDir,
+                onLog = { appendLog(it) }
+            )
+
+            val pubJson = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(report.jsonReportPath),
+                subFolder = "KEY/Data",
+                onLog = { appendLog(it) }
+            )
+            val pubTxt = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(report.txtReportPath),
+                subFolder = "KEY/Data",
+                onLog = { appendLog(it) }
+            )
+
+            val updatedApks = signProEngine.scanSystemApks(targetDir)
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    scannedApks = updatedApks,
+                    lastSignatureReport = report.copy(
+                        jsonReportPath = pubJson,
+                        txtReportPath = pubTxt
+                    )
+                )
+            }
+        }
+    }
+
     fun signSingleSelectedApk() {
         viewModelScope.launch {
             val state = _uiState.value
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Resignature In-Memory de l'APK individuel...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Signature de l'APK individuel...") }
 
-            var currentKeys = repository.getAllKeys()
-            if (currentKeys.isEmpty()) {
-                currentKeys = keyMakerEngine.generateFullKeySuite(
-                    organization = state.keyOrg,
-                    commonName = state.keyCommonName,
-                    countryCode = state.keyCountry,
-                    validityYears = 25,
-                    onLog = { appendLog(it) }
-                )
-                currentKeys.forEach { repository.saveKey(it) }
-            }
-
+            val currentKeys = ensureKeysAvailable(state)
             val sourceFile = if (state.selectedSingleApkPath.isNotEmpty() && File(state.selectedSingleApkPath).exists()) {
                 File(state.selectedSingleApkPath)
             } else {
@@ -455,7 +536,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             val publicPath = storageManager.exportSingleFileToPublicRomForge(
                 sourceFile = signedOut,
-                subFolder = "signed_apks",
+                subFolder = "PACKED/signed_apks",
                 onLog = { appendLog(it) }
             )
 
@@ -478,21 +559,10 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Signature In-Memory de tous les APKs dans ${targetDir.name}..."
+                    activeTaskTitle = "Signature de tous les APKs dans UNPACK/${targetDir.name}..."
                 )
             }
-            var currentKeys = repository.getAllKeys()
-            if (currentKeys.isEmpty()) {
-                appendLog("[SIGN-PRO] Aucune clé détectée -> Auto-génération préalable de la chaîne RSA-2048...")
-                currentKeys = keyMakerEngine.generateFullKeySuite(
-                    organization = state.keyOrg,
-                    commonName = state.keyCommonName,
-                    countryCode = state.keyCountry,
-                    validityYears = 25,
-                    onLog = { appendLog(it) }
-                )
-                currentKeys.forEach { repository.saveKey(it) }
-            }
+            val currentKeys = ensureKeysAvailable(state)
 
             val batchResult = signProEngine.signAllApksInMemoryAndPatchMacPermissions(
                 keys = currentKeys,
@@ -501,15 +571,23 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 onLog = { appendLog(it) }
             )
 
+            // Also generate the signature audit report in KEY/Data automatically
+            val sigReport = signProEngine.verifySignaturesAndExportReport(
+                targetDecompiledDir = targetDir,
+                singleApkFilter = null,
+                keyDataDir = storageManager.getKeyDataReportsDir(),
+                onLog = { appendLog(it) }
+            )
+
             val publicMirroredPath = storageManager.mirrorDirectoryToPublicDownloadRomForge(
                 sourceDir = targetDir,
-                subFolderName = "decompiled_imgs/${targetDir.name}",
+                subFolderName = "UNPACK/${targetDir.name}",
                 onLog = { appendLog(it) }
             )
 
             val updatedApks = signProEngine.scanSystemApks(targetDir)
             val updatedMacXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
-            val summary = crossVerifierEngine.runFullDiagnostic(currentKeys) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
@@ -519,12 +597,30 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskTitle = "",
                     scannedApks = updatedApks,
                     lastBatchSignResult = batchResult.copy(outputDirectoryPath = publicMirroredPath),
+                    lastSignatureReport = sigReport,
                     macPermissionsPreview = updatedMacXml,
                     cleNoteJsonPreview = keyMakerEngine.readCleNoteManifestJson(),
                     verificationSummary = summary
                 )
             }
         }
+    }
+
+    private suspend fun ensureKeysAvailable(state: KitchenUiState): List<KeyManifestEntity> {
+        var currentKeys = repository.getAllKeys()
+        if (currentKeys.isEmpty() || currentKeys.any { !File(it.pk8Path).exists() }) {
+            appendLog("[KEY-AUTO] Génération automatique de la chaîne de confiance RSA-2048 dans ROM_FORGE/KEY...")
+            currentKeys = keyMakerEngine.generateFullKeySuite(
+                organization = state.keyOrg,
+                commonName = state.keyCommonName,
+                countryCode = state.keyCountry,
+                validityYears = 25,
+                onLog = { appendLog(it) }
+            )
+            repository.clearKeys()
+            currentKeys.forEach { repository.saveKey(it) }
+        }
+        return currentKeys
     }
 
     // --- Module 3: Generator ---
@@ -545,10 +641,10 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Compilation ART dex2oat (.odex/.vdex) sur ${targetDir.name}..."
+                    activeTaskTitle = "Compilation ART dex2oat (.odex/.vdex) sur UNPACK/${targetDir.name}..."
                 )
             }
-            val currentKeys = repository.getAllKeys()
+            val currentKeys = ensureKeysAvailable(state)
             val report = artGeneratorEngine.generateArtCacheAndSecurityArtifacts(
                 compilerFilter = state.selectedCompilerFilter,
                 instructionSet = state.selectedInstructionSet,
@@ -561,7 +657,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             val publicPath = storageManager.mirrorDirectoryToPublicDownloadRomForge(
                 sourceDir = targetDir,
-                subFolderName = "decompiled_imgs/${targetDir.name}",
+                subFolderName = "UNPACK/${targetDir.name}",
                 onLog = { appendLog(it) }
             )
 
@@ -601,7 +697,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 autoRepairBootloopRisks = autoRepair,
                 targetDecompiledDir = targetDir
             ) { appendLog(it) }
-            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys()) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), targetDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
@@ -623,32 +719,32 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Construction ${state.selectedFsFormat.name} depuis ${targetDir.name} -> ROM_FORGE/compiled_imgs..."
+                    activeTaskTitle = "Compilation ${state.selectedFsFormat.name} depuis UNPACK/${targetDir.name} -> ROM_FORGE/PACKED..."
                 )
             }
-            val activeKeys = repository.getAllKeys()
+            val activeKeys = ensureKeysAvailable(state)
             val output = imgCompilerEngine.compileSystemAndVbmetaImages(
                 format = state.selectedFsFormat,
                 enableDmVerity = state.enableDmVerity,
                 disableVerityFlagsInVbmeta = state.disableVerityFlagsInVbmeta,
                 activeKeys = activeKeys,
                 targetDecompiledDir = targetDir,
-                outputImagesDir = storageManager.getCompiledOutputImagesDir(),
+                outputImagesDir = storageManager.getPackedOutputImagesDir(),
                 onLog = { appendLog(it) }
             )
 
             val pubSystemImg = storageManager.exportSingleFileToPublicRomForge(
                 sourceFile = File(output.systemImgPath),
-                subFolder = "compiled_imgs",
+                subFolder = "PACKED",
                 onLog = { appendLog(it) }
             )
             val pubVbmetaImg = storageManager.exportSingleFileToPublicRomForge(
                 sourceFile = File(output.vbmetaImgPath),
-                subFolder = "compiled_imgs",
+                subFolder = "PACKED",
                 onLog = { appendLog(it) }
             )
 
-            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, targetDir) { appendLog(it) }
             _uiState.update {
                 it.copy(
                     isBusy = false,
@@ -665,14 +761,11 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * Real Zero-Copy EXT4 / Sparse-EXT4 Decompiler:
-     * Opens the `.img` directly via `ParcelFileDescriptor` (`FileChannel`) and extracts all inodes,
-     * directories, regular files, symlinks, `fs_config` and SELinux contexts into
-     * `/storage/emulated/0/ROM_FORGE/decompiled_imgs/<folderSlug>/`.
+     * Real Zero-Copy EXT4 / Sparse-EXT4 Decompiler into `ROM_FORGE/UNPACK/<folderSlug>/`.
      */
     fun importAndInspectExternalImg(uri: Uri?, fallbackName: String = "system_custom.img") {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Décompilation complète de l'image .img vers ROM_FORGE...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Décompilation complète de l'image .img vers ROM_FORGE/UNPACK...") }
 
             val rawImgName = if (uri != null) {
                 resolveUriDisplayName(uri) ?: fallbackName
@@ -681,9 +774,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             }
             val cleanImgFileName = if (rawImgName.endsWith(".img", true)) rawImgName else "$rawImgName.img"
             val folderSlug = cleanImgFileName.substringBeforeLast(".").replace(Regex("[^a-zA-Z0-9_-]"), "_")
-            val targetExtractDir = File(storageManager.getExtractedImagesRoot(), folderSlug)
+            val targetExtractDir = File(storageManager.getUnpackRootDir(), folderSlug)
 
-            // If user selected a real .img URI, clean any previous 7-folder stub so only real extracted content is present
             if (uri != null && targetExtractDir.exists()) {
                 val buildProp = File(targetExtractDir, "build.prop")
                 if (buildProp.exists() && buildProp.length() < 600L) {
@@ -741,7 +833,6 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             }
 
-            // If a synthetic test image or EROFS image had 0 real EXT4 files, ensure complete AOSP tree exists and update report counts
             if (report.extractedFilesCount == 0) {
                 assetBinaryManager.populateDecompiledImgStructure(targetExtractDir, folderSlug)
                 val finalFilesCount = targetExtractDir.walkTopDown().count { it.isFile }
@@ -756,19 +847,20 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     extractedSizeMb = (finalBytes / (1024 * 1024)).coerceAtLeast(1L)
                 )
                 appendLog(
-                    "[IMG-COMPLETE] Arborescence AOSP complète extraite : $finalFilesCount fichiers, $finalDirsCount dossiers, $finalSymlinks symlinks dans ${targetExtractDir.absolutePath}"
+                    "[IMG-COMPLETE] Arborescence AOSP complète extraite dans UNPACK : $finalFilesCount fichiers, $finalDirsCount dossiers, $finalSymlinks symlinks"
                 )
             }
 
             val publicVisibleFolder = storageManager.mirrorDirectoryToPublicDownloadRomForge(
                 sourceDir = targetExtractDir,
-                subFolderName = "decompiled_imgs/$folderSlug",
+                subFolderName = "UNPACK/$folderSlug",
                 onLog = { appendLog(it) }
             )
 
             val allFolders = storageManager.listDecompiledImgDirectories()
             val apks = signProEngine.scanSystemApks(targetExtractDir)
             val macXml = signProEngine.readCurrentMacPermissionsXml(targetExtractDir)
+            val portAnalysis = autoPorterEngine.analyzeStockAndGsiTrees(targetExtractDir) { appendLog(it) }
 
             _uiState.update {
                 it.copy(
@@ -776,27 +868,47 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskTitle = "",
                     availableDecompiledImgs = allFolders.map { f -> f.name },
                     selectedDecompiledImgName = targetExtractDir.name,
-                    selectedDecompiledImgFullPath = publicVisibleFolder,
+                    selectedDecompiledImgFullPath = targetExtractDir.absolutePath,
                     scannedApks = apks,
                     macPermissionsPreview = macXml,
+                    portAnalysisResult = portAnalysis,
                     lastMountedImgReport = report.copy(mountPointUsed = publicVisibleFolder)
                 )
             }
         }
     }
 
-    // --- Module 5: Auto-Porter ---
+    // --- Module 5: Auto-Porter (Outputs to ROM_FORGE/PORT/) ---
     fun executeGsiToSystemAutoPort() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Portage GSI -> System dans ROM_FORGE...") }
-            val result = autoPorterEngine.executeFullGsiPortingPipeline { appendLog(it) }
-
-            val targetDir = File(_uiState.value.selectedDecompiledImgFullPath)
-            storageManager.mirrorDirectoryToPublicDownloadRomForge(
-                sourceDir = targetDir,
-                subFolderName = "decompiled_imgs/${targetDir.name}",
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Portage GSI (${gsiDir.name}) & Résolution FOD vers ROM_FORGE/PORT..."
+                )
+            }
+            val result = autoPorterEngine.executeFullGsiPortingPipeline(
+                targetUnpackedGsiDir = gsiDir,
+                compilePortedImg = true,
                 onLog = { appendLog(it) }
             )
+
+            val portedFolder = File(result.portOutputDirectoryPath)
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = portedFolder,
+                subFolderName = "PORT/${portedFolder.name}",
+                onLog = { appendLog(it) }
+            )
+
+            val portedImg = File(result.portedSystemImgPath)
+            val pubPortedImg = if (portedImg.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(
+                    sourceFile = portedImg,
+                    subFolder = "PORT",
+                    onLog = { appendLog(it) }
+                )
+            } else result.portedSystemImgPath
 
             repository.addPortHistory(
                 PortHistoryEntity(
@@ -810,8 +922,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             )
 
-            val updatedApks = signProEngine.scanSystemApks(targetDir)
-            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys()) { appendLog(it) }
+            val updatedApks = signProEngine.scanSystemApks(portedFolder)
+            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), portedFolder) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
@@ -819,7 +931,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
-                    portAnalysisResult = result,
+                    portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
                     scannedApks = updatedApks,
                     verificationSummary = summary
                 )
@@ -827,10 +939,106 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    // --- Interactive Terminal & Log Export in Console ---
+    fun executeInteractiveTerminalCommand(rawCmd: String) {
+        val trimmed = rawCmd.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            appendLog("$ $trimmed")
+            when {
+                trimmed.equals("help", true) -> {
+                    appendLog("[SHELL-HELP] Commandes disponibles : ls, ls unpack, ls packed, ls key, ls port, getprop, avbtool, mke2fs, mkfs.erofs, dex2oat, zipalign, verify-apks, clear")
+                }
+                trimmed.equals("clear", true) -> {
+                    clearLogs()
+                }
+                trimmed.equals("ls", true) || trimmed.equals("ls -la", true) -> {
+                    val root = storageManager.getRomForgePublicRoot()
+                    val subdirs = root.listFiles()?.joinToString("  ") {
+                        if (it.isDirectory) "[DIR] ${it.name}/" else "${it.name} (${it.length()}B)"
+                    } ?: "vide"
+                    appendLog("${root.absolutePath} -> $subdirs")
+                }
+                trimmed.equals("ls unpack", true) -> {
+                    val items = storageManager.listDecompiledImgDirectories().joinToString(", ") {
+                        "${it.name} (${it.walkTopDown().count { f -> f.isFile }} fichiers)"
+                    }
+                    appendLog("[UNPACK] $items")
+                }
+                trimmed.equals("ls packed", true) -> {
+                    val items = storageManager.getPackedOutputImagesDir().listFiles()?.joinToString(", ") {
+                        "${it.name} (${it.length() / 1024} KB)"
+                    } ?: "Aucun fichier dans PACKED"
+                    appendLog("[PACKED] $items")
+                }
+                trimmed.equals("ls key", true) -> {
+                    val items = storageManager.getKeyRootDir().walkTopDown().filter { it.isFile }.joinToString(", ") {
+                        it.relativeTo(storageManager.getKeyRootDir()).path
+                    }
+                    appendLog("[KEY] $items")
+                }
+                trimmed.equals("ls port", true) -> {
+                    val items = storageManager.getPortWorkspaceRootDir().listFiles()?.joinToString(", ") {
+                        if (it.isDirectory) "${it.name}/" else "${it.name} (${it.length() / 1024} KB)"
+                    } ?: "Aucun élément dans PORT"
+                    appendLog("[PORT] $items")
+                }
+                trimmed.equals("verify-apks", true) -> {
+                    verifyApkSignaturesAndExportReports(null)
+                }
+                trimmed.startsWith("getprop") -> {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            val args = trimmed.split(Regex("\\s+"))
+                            val proc = ProcessBuilder(args).redirectErrorStream(true).start()
+                            val lines = proc.inputStream.bufferedReader().readLines().take(25)
+                            lines.forEach { appendLog(it) }
+                        } catch (e: Exception) {
+                            appendLog("[SHELL-ERR] ${e.message}")
+                        }
+                    }
+                }
+                else -> {
+                    shellEngine.executeCommand(trimmed) { line ->
+                        appendLog(line)
+                    }
+                }
+            }
+        }
+    }
+
+    fun exportTerminalLogsToTxtFile() {
+        viewModelScope.launch {
+            val logs = _uiState.value.terminalLogs
+            val keyDataDir = storageManager.getKeyDataReportsDir()
+            val fileName = "console_session_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.txt"
+            val outFile = File(keyDataDir, fileName)
+
+            val content = buildString {
+                appendLine("==================================================================")
+                appendLine("  ROM FORGE • JOURNAL TERMINAL & HISTORIQUE SESSION")
+                appendLine("==================================================================")
+                logs.forEach { entry ->
+                    appendLine("${entry.timestamp} [${entry.level}] ${entry.message}")
+                }
+            }
+            withContext(Dispatchers.IO) {
+                outFile.writeText(content)
+            }
+            val pubPath = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = outFile,
+                subFolder = "KEY/Data",
+                onLog = { appendLog(it) }
+            )
+            _uiState.update { it.copy(lastSavedLogFilePath = pubPath) }
+        }
+    }
+
     fun runIntelligentCrossVerifier() {
         viewModelScope.launch {
+            val activeDir = File(_uiState.value.selectedDecompiledImgFullPath)
             _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Exécution du Vérificateur Croisé Intelligent...") }
-            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys()) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), activeDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
             _uiState.update {
@@ -861,12 +1069,12 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         val level = when {
             rawMessage.contains("ERREUR") || rawMessage.contains("CRITICAL") || rawMessage.contains("[STDERR]") -> "ERROR"
             rawMessage.contains("Avertissement") || rawMessage.contains("WARN") -> "WARN"
-            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[EXT4-SUCCESS]") || rawMessage.contains("[ROM_FORGE") -> "SUCCESS"
+            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[EXT4") || rawMessage.contains("[ROM_FORGE") || rawMessage.contains("[SIGN-VERIFY]") -> "SUCCESS"
             else -> "INFO"
         }
         val entry = TerminalLogEntry(timestamp = time, message = rawMessage, level = level)
         _uiState.update { current ->
-            val updated = (current.terminalLogs + entry).takeLast(300)
+            val updated = (current.terminalLogs + entry).takeLast(400)
             current.copy(terminalLogs = updated)
         }
     }

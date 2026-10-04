@@ -1,8 +1,11 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +25,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.SettingsInputComponent
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -44,11 +48,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.local.PortHistoryEntity
 import com.example.ui.KitchenUiState
+import com.example.ui.components.DecompiledImgTargetSelectorCard
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AutoPorterScreen(
     uiState: KitchenUiState,
     portHistory: List<PortHistoryEntity>,
+    onSelectDecompiledImg: (String) -> Unit,
+    onPickCustomSafTree: (Uri?) -> Unit,
     onExecuteFullAutoPort: () -> Unit
 ) {
     var showLineageMkPreview by remember { mutableStateOf(false) }
@@ -62,7 +70,6 @@ fun AutoPorterScreen(
     ) {
         item {
             Spacer(modifier = Modifier.height(6.dp))
-            // Header Card: Virtual Device Tree Generator (LineageOS 23.2 / 24.0 Inspired)
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -77,12 +84,12 @@ fun AutoPorterScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "MODULE 5 • AUTO-PORTER (GSI TO SYSTEM)",
+                                text = "MODULE 5 • AUTO-PORTER (GSI TO SYSTEM -> /PORT)",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Virtual Device Tree LineageOS : Blobs ELF64, RRO Overlays, VINTF, SEPolicy CIL & Résolveur FOD",
+                                text = "Détecte le capteur FOD de votre téléphone (sans root) + LineageOS Xiaomi Tucana (SM6150) et génère le système & l'image portée dans ROM_FORGE/PORT/",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -101,7 +108,7 @@ fun AutoPorterScreen(
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
                                     Text(
-                                        text = "STOCK VENDOR REF",
+                                        text = "APPAREIL HÔTE & DEVICE TREE",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold
@@ -112,7 +119,7 @@ fun AutoPorterScreen(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "SoC : ${portResult.stockBoardPlatform}",
+                                        text = "${portResult.stockDeviceModel} (${portResult.stockBoardPlatform})",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontFamily = FontFamily.Monospace
                                     )
@@ -126,18 +133,18 @@ fun AutoPorterScreen(
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
                                     Text(
-                                        text = "BASE OS CIBLE (GSI)",
+                                        text = "SORTIE DÉDIÉE (/PORT)",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.secondary,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "AOSP 15 Treble GSI",
+                                        text = "ROM_FORGE/PORT/",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "VINTF + RRO + UDFPS",
+                                        text = "Dossier + .IMG final",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontFamily = FontFamily.Monospace
                                     )
@@ -159,7 +166,7 @@ fun AutoPorterScreen(
                         ) {
                             Icon(imageVector = Icons.Default.AutoFixHigh, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Transplanter & Réparer FOD")
+                            Text("Porter GSI & FOD (-> PORT)")
                         }
 
                         FilledTonalButton(
@@ -171,11 +178,45 @@ fun AutoPorterScreen(
                             Text("device.mk")
                         }
                     }
+
+                    if (portResult != null && portResult.fodDiagnostics.systemUiOverlayInjected) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = "Portage Complet disponible dans ROM_FORGE/PORT :",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Text(
+                                    text = "Système Porté : ${portResult.portOutputDirectoryPath}\nImage .IMG    : ${portResult.portedSystemImgPath}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Virtual Device Tree Makefile Preview (LineageOS style)
+        // Dropdown Selector to pick which unpacked GSI in UNPACK to port
+        item {
+            DecompiledImgTargetSelectorCard(
+                title = "GSI Décompilé Source (depuis UNPACK) à Porter :",
+                availableFolders = uiState.availableDecompiledImgs,
+                selectedFolderName = uiState.selectedDecompiledImgName,
+                selectedFullPath = uiState.selectedDecompiledImgFullPath,
+                onSelectFolder = onSelectDecompiledImg,
+                onPickExternalSafTree = onPickCustomSafTree
+            )
+        }
+
         item {
             AnimatedVisibility(visible = showLineageMkPreview && portResult != null) {
                 Card(
@@ -186,7 +227,7 @@ fun AutoPorterScreen(
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
                         Text(
-                            text = "LineageOS Virtual Device Tree (device_${portResult?.stockDeviceCodename}_port.mk)",
+                            text = "LineageOS Virtual Device Tree (ROM_FORGE/PORT/lineage_${portResult?.stockDeviceCodename}.mk)",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -202,7 +243,6 @@ fun AutoPorterScreen(
             }
         }
 
-        // Dedicated UDFPS / FOD (Fingerprint On Display) Resolver Card
         if (portResult != null) {
             item {
                 val fod = portResult.fodDiagnostics
@@ -230,7 +270,7 @@ fun AutoPorterScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column {
                                     Text(
-                                        text = "RÉSOLVEUR FOD / UDFPS (CAPTEUR SOUS L'ÉCRAN)",
+                                        text = "ANALYSEUR FOD / UDFPS (HÔTE ANDROID & GSI)",
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.ExtraBold
                                     )
@@ -248,7 +288,7 @@ fun AutoPorterScreen(
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text(
-                                    text = if (fod.systemUiOverlayInjected) "HBM SHIM ACTIF" else "DÉTECTÉ",
+                                    text = if (fod.systemUiOverlayInjected) "100% INTÉGRÉ" else "PRÊT À PORTER",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = if (fod.systemUiOverlayInjected) MaterialTheme.colorScheme.onSecondaryContainer
@@ -259,32 +299,31 @@ fun AutoPorterScreen(
                         }
 
                         Text(
-                            text = "HAL Biométrique : ${fod.halInterface}",
+                            text = "• Interface HIDL : ${fod.halInterface}\n" +
+                                    "• Service AIDL   : ${fod.aidlBiometricsService}\n" +
+                                    "• Géométrie FOD  : Centre=(${fod.fodCenterX}px, ${fod.fodCenterY}px) | Taille=${fod.fodWidthPx}x${fod.fodHeightPx}px (Rayon=${fod.fodRadiusPx}px)\n" +
+                                    "• Noeud HBM      : ${fod.hbmSysfsNode} (0x20000)\n" +
+                                    "• DimLayer Alpha : ${fod.dimLayerAlphaNode}\n" +
+                                    "• Script Init RC : /system/${fod.shimScriptPath}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace
                         )
-                        Text(
-                            text = "Coordonnées Capteur : X=${fod.fodCenterX}px, Y=${fod.fodCenterY}px, Rayon=${fod.fodRadiusPx}px",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "Noeud HBM (High Brightness) : ${fod.hbmSysfsNode}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                        Text(
-                            text = "Shim Init RC : /system/${fod.shimScriptPath}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace
-                        )
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            fod.gsiFodPropsDetected.forEach { feat ->
+                                AssistChip(
+                                    onClick = {},
+                                    label = { Text(feat, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                        }
                     }
                 }
             }
 
-            // RRO Overlay & SEPolicy CIL Summary Card
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -299,32 +338,24 @@ fun AutoPorterScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Générateur RRO (TrebleHardwareOverlay.apk) & SEPolicy CIL",
+                                text = "Overlays RRO Tucana, VINTF & SEPolicy CIL (-> PORT)",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
                         }
                         Text(
-                            text = "• APK Overlay : /product/overlay/TrebleHardwareOverlay.apk (priorité 999, isStatic=true)",
+                            text = "• Overlays générés : TrebleHardwareOverlay.apk & SystemUIUdfpsTucanaOverlay.apk\n" +
+                                    "• VINTF Matrix     : manifest_tucana_fod.xml (IBiometricsFingerprint 2.3 + IXiaomiFingerprint + IDisplayFeature)\n" +
+                                    "• SEPolicy CIL     : ${portResult.sepolicyCilMergedRulesCount} règles anti-AVC injectées dans plat_pub_versioned.cil",
                             style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            text = "• Configs fusionnées : audio_policy_configuration.xml, media_profiles_V1_0.xml, manifest_merged.xml",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            text = "• SEPolicy Anti-AVC : ${portResult.sepolicyCilMergedRulesCount} règles CIL injectées dans plat_pub_versioned.cil",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.secondary
                         )
                     }
                 }
             }
 
-            // Proprietary Blobs List
             item {
                 Text(
-                    text = "Extracteur de Blobs Propriétaires (${portResult.proprietaryBlobs.size} librairies ELF64)",
+                    text = "Blobs Propriétaires Transplantés dans PORT (${portResult.proprietaryBlobs.size})",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -382,7 +413,7 @@ fun AutoPorterScreen(
         if (portHistory.isNotEmpty()) {
             item {
                 Text(
-                    text = "Historique des Portages GSI (${portHistory.size})",
+                    text = "Historique des Portages GSI dans ROM_FORGE/PORT (${portHistory.size})",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )

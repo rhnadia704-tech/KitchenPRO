@@ -31,11 +31,15 @@ class CrossVerifierEngine(private val workspaceDir: File) {
 
     suspend fun runFullDiagnostic(
         activeKeys: List<KeyManifestEntity>,
+        targetDecompiledDir: File? = null,
         onLog: (String) -> Unit
     ): CrossVerificationSummary = withContext(Dispatchers.IO) {
         val alerts = mutableListOf<VerificationAlertEntity>()
-        val systemRoot = File(workspaceDir, "system_ext4")
-        val vendorRoot = File(workspaceDir, "stock_vendor_ref")
+        val systemRoot = targetDecompiledDir?.takeIf { it.exists() }
+            ?: File(workspaceDir, "UNPACK/system_ext4").takeIf { it.exists() }
+            ?: File(workspaceDir, "system_ext4")
+        val vendorRoot = File(workspaceDir, "PORT/stock_vendor_ref").takeIf { it.exists() }
+            ?: File(workspaceDir, "stock_vendor_ref")
 
         onLog("[VERIFIER] Démarrage de l'analyse croisée intelligente AOSP...")
 
