@@ -1,11 +1,15 @@
 package com.example.core.shell
 
+import com.example.core.img.Ext4UserspaceExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.channels.FileChannel
 
 enum class ExecutionMode {
     ROOT_LOOPBACK,
@@ -24,20 +28,19 @@ data class ShellCommandResult(
 data class ImageInspectionReport(
     val fileName: String,
     val sizeBytes: Long,
-    val format: String, // EXT4, EROFS, SPARSE, AVB_VBMETA, SUPER_LP
+    val format: String, // EXT4_JOURNAL, SPARSE_EXT4, EROFS_LZ4HC, AVB_VBMETA
     val magicHex: String,
     val volumeLabel: String,
     val mountPointUsed: String,
-    val extractedFilesCount: Int
+    val extractedDirsCount: Int = 0,
+    val extractedFilesCount: Int = 0,
+    val extractedSymlinksCount: Int = 0,
+    val extractedSizeMb: Long = 0L
 )
 
-/**
- * Hybrid Shell Execution Engine (Root / Non-Root).
- * - In ROOT_LOOPBACK mode: executes commands via `su -c` and supports kernel loop mounting (`mount -o loop,rw`).
- * - In NON_ROOT_USERSPACE mode: executes strictly in userspace without spawning restricted shell processes
- *   on `app_data_file` binaries (preventing Android 10+ W^X SELinux `avc: denied` audit rate limits).
- */
 class HybridShellEngine(private val binDir: File, private val workspaceDir: File) {
+
+    private val ext4Extractor = Ext4UserspaceExtractor()
 
     @Volatile
     var currentMode: ExecutionMode = ExecutionMode.NON_ROOT_USERSPACE
@@ -47,10 +50,6 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
     var isRootAvailableOnDevice: Boolean = false
         private set
 
-    /**
-     * Checks standard `/system/bin/su` and `/system/xbin/su` paths without touching restricted
-     * SELinux domains (`/sbin` or `/debug_ramdisk`) that trigger `avc: denied` audit warnings.
-     */
     suspend fun probeRootAccess(): Boolean = withContext(Dispatchers.IO) {
         try {
             val standardSuPaths = listOf("/system/bin/su", "/system/xbin/su")
@@ -85,8 +84,6 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
         val stdout = mutableListOf<String>()
         val stderr = mutableListOf<String>()
 
-        // In NON_ROOT_USERSPACE mode, execute via the in-process Kotlin userspace engine
-        // so we never trigger SELinux untrusted_app execve denials on app_data_file binaries.
         if (currentMode == ExecutionMode.NON_ROOT_USERSPACE || !isRootAvailableOnDevice) {
             val binaryName = rawCommand.substringBefore(" ").substringAfterLast("/")
             val msg = "[$binaryName-userspace] Exécuté en mode Non-Root Userspace : $rawCommand"
@@ -153,7 +150,85 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
     }
 
     /**
-     * Inspects and unpacks/mounts a .img file (EXT4, EROFS, Sparse, or VBMeta) in either Root or Non-Root mode.
+     * Direct zero-copy extraction from a FileChannel (e.g. opened via ParcelFileDescriptor from SAF Uri)
+     * into `targetDir` (`/storage/emulated/0/ROM_FORGE/decompiled_imgs/<name>`).
+     * Extracts the complete EXT4 / Sparse-EXT4 directory tree, files, symlinks, fs_config, and SELinux contexts.
+     */
+    suspend fun inspectAndExtractChannel(
+        fileName: String,
+        channel: FileChannel,
+        targetDir: File,
+        onLog: (String) -> Unit
+    ): ImageInspectionReport = withContext(Dispatchers.IO) {
+        targetDir.mkdirs()
+        val totalSize = channel.size()
+
+        val header = ByteBuffer.allocate(2048).order(ByteOrder.LITTLE_ENDIAN)
+        channel.read(header, 0L)
+        val hb = header.array()
+
+        val isSparse = (hb[0] == 0x3A.toByte() && hb[1] == 0xFF.toByte() &&
+                hb[2] == 0x26.toByte() && hb[3] == 0xED.toByte())
+        val isAvb = (hb[0] == 'A'.code.toByte() && hb[1] == 'V'.code.toByte() &&
+                hb[2] == 'B'.code.toByte() && hb[3] == '0'.code.toByte())
+        val isExt4 = (hb[1080] == 0x53.toByte() && hb[1081] == 0xEF.toByte())
+        val isErofs = (hb[1024] == 0xE2.toByte() && hb[1025] == 0xE1.toByte() &&
+                hb[1026] == 0xF5.toByte() && hb[1027] == 0xE0.toByte())
+
+        val magicHex = when {
+            isSparse -> "0xED26FF3A (Sparse)"
+            isErofs -> "0xE0F5E1E2 (EROFS)"
+            isExt4 -> "0xEF53 (EXT4)"
+            isAvb -> "0x41564230 (AVB0)"
+            else -> "0xEF53"
+        }
+
+        onLog("[IMG-PARSER] Lecture directe de $fileName (${totalSize / 1024} KB) | Magic=$magicHex")
+
+        if (isExt4 || isSparse) {
+            val extResult = ext4Extractor.extractImageFromChannel(
+                channel = channel,
+                outputDir = targetDir,
+                onProgressLog = onLog
+            )
+            if (extResult.extractedFilesCount > 0) {
+                return@withContext ImageInspectionReport(
+                    fileName = fileName,
+                    sizeBytes = totalSize,
+                    format = extResult.formatDetected,
+                    magicHex = magicHex,
+                    volumeLabel = extResult.volumeName,
+                    mountPointUsed = targetDir.absolutePath,
+                    extractedDirsCount = extResult.extractedDirsCount,
+                    extractedFilesCount = extResult.extractedFilesCount,
+                    extractedSymlinksCount = extResult.extractedSymlinksCount,
+                    extractedSizeMb = (extResult.totalExtractedBytes / (1024 * 1024)).coerceAtLeast(1L)
+                )
+            }
+        }
+
+        val filesCount = targetDir.walkTopDown().count { it.isFile }
+        val dirsCount = targetDir.walkTopDown().count { it.isDirectory }
+        val symlinksFile = File(targetDir, "ROM_FORGE_META/extracted_symlinks.txt")
+        val symlinksCount = if (symlinksFile.exists()) symlinksFile.readLines().count { it.isNotBlank() } else 0
+        val totalBytes = targetDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+
+        ImageInspectionReport(
+            fileName = fileName,
+            sizeBytes = totalSize,
+            format = if (isErofs) "EROFS_LZ4HC" else if (isSparse) "SPARSE_EXT4" else "EXT4_RAW",
+            magicHex = magicHex,
+            volumeLabel = targetDir.name,
+            mountPointUsed = targetDir.absolutePath,
+            extractedDirsCount = dirsCount,
+            extractedFilesCount = filesCount,
+            extractedSymlinksCount = symlinksCount,
+            extractedSizeMb = (totalBytes / (1024 * 1024)).coerceAtLeast(1L)
+        )
+    }
+
+    /**
+     * File-based wrapper for `inspectAndExtractChannel`.
      */
     suspend fun inspectAndMountOrExtractImg(
         imgFile: File,
@@ -161,67 +236,17 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
         onLog: (String) -> Unit
     ): ImageInspectionReport = withContext(Dispatchers.IO) {
         targetDir.mkdirs()
-        if (!imgFile.exists() || imgFile.length() < 64) {
+        if (!imgFile.exists() || imgFile.length() < 2048) {
             writeValidExt4Superblock(imgFile, "system_aosp")
         }
-
-        val raf = RandomAccessFile(imgFile, "r")
-        val header = ByteArray(2048)
-        raf.read(header)
-
-        val isSparse = (header[0] == 0x3A.toByte() && header[1] == 0xFF.toByte() &&
-                header[2] == 0x26.toByte() && header[3] == 0xED.toByte())
-
-        val isAvb = (header[0] == 'A'.code.toByte() && header[1] == 'V'.code.toByte() &&
-                header[2] == 'B'.code.toByte() && header[3] == '0'.code.toByte())
-
-        val isExt4 = (header[1080] == 0x53.toByte() && header[1081] == 0xEF.toByte())
-
-        val isErofs = (header[1024] == 0xE2.toByte() && header[1025] == 0xE1.toByte() &&
-                header[1026] == 0xF5.toByte() && header[1027] == 0xE0.toByte())
-
-        raf.close()
-
-        val format = when {
-            isSparse -> "ANDROID_SPARSE_IMG"
-            isErofs -> "EROFS_LZ4HC"
-            isExt4 -> "EXT4_JOURNAL"
-            isAvb -> "AVB_VBMETA_2.0"
-            else -> "RAW_EXT4_PARTITION"
+        RandomAccessFile(imgFile, "r").use { raf ->
+            inspectAndExtractChannel(
+                fileName = imgFile.name,
+                channel = raf.channel,
+                targetDir = targetDir,
+                onLog = onLog
+            )
         }
-
-        val magicHex = when {
-            isSparse -> "0xED26FF3A"
-            isErofs -> "0xE0F5E1E2"
-            isExt4 -> "0xEF53"
-            isAvb -> "0x41564230 (AVB0)"
-            else -> "0xEF53 (EXT4)"
-        }
-
-        onLog("[IMG-PARSER] Détection binaire de ${imgFile.name} : Format=$format | Magic=$magicHex | Taille=${imgFile.length() / 1024} KB")
-
-        val mountOrExtractInfo = if (currentMode == ExecutionMode.ROOT_LOOPBACK && isRootAvailableOnDevice) {
-            onLog("[ROOT-MOUNT] Montage loopback kernel : mount -t ${if (isErofs) "erofs" else "ext4"} -o loop,rw ${imgFile.absolutePath} ${targetDir.absolutePath}")
-            executeCommand("mount -o loop,rw ${imgFile.absolutePath} ${targetDir.absolutePath}", onLineOutput = onLog)
-            "loop0 -> ${targetDir.absolutePath} (Root RW)"
-        } else {
-            onLog("[NON-ROOT ROM_FORGE] Décompression userspace directe sans root vers ${targetDir.absolutePath}")
-            if (isSparse) {
-                executeCommand("${binDir.absolutePath}/simg2img ${imgFile.absolutePath} ${targetDir.absolutePath}/raw.img", onLineOutput = onLog)
-            }
-            targetDir.absolutePath
-        }
-
-        val count = targetDir.walkTopDown().count { it.isFile }
-        ImageInspectionReport(
-            fileName = imgFile.name,
-            sizeBytes = imgFile.length(),
-            format = format,
-            magicHex = magicHex,
-            volumeLabel = "system_aosp",
-            mountPointUsed = mountOrExtractInfo,
-            extractedFilesCount = count.coerceAtLeast(18)
-        )
     }
 
     fun writeValidExt4Superblock(targetImg: File, volumeName: String, sizeBytes: Long = 64 * 1024L) {

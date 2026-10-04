@@ -7,12 +7,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
@@ -21,6 +19,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -40,10 +39,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.KitchenTab
 import com.example.ui.RomKitchenViewModel
-import com.example.ui.components.IntegratedTerminalConsole
 import com.example.ui.components.TopSystemStatusBar
 import com.example.ui.screens.AutoPorterScreen
 import com.example.ui.screens.CompilerScreen
+import com.example.ui.screens.ConsoleHistoryScreen
 import com.example.ui.screens.GeneratorScreen
 import com.example.ui.screens.KeyMakerScreen
 import com.example.ui.screens.SignProScreen
@@ -71,9 +70,16 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
 
     if (uiState.currentTab != KitchenTab.KEY_MAKER) {
         BackHandler {
-            viewModel.selectTab(KitchenTab.KEY_MAKER)
+            if (uiState.currentTab == KitchenTab.CONSOLE) {
+                viewModel.toggleConsoleTab()
+            } else {
+                viewModel.selectTab(KitchenTab.KEY_MAKER)
+            }
         }
     }
+
+    // All 6 navigation tabs including the dedicated Console & Historique tab
+    val mainNavigationTabs = KitchenTab.entries
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val isWideScreen = maxWidth >= 600.dp
@@ -91,43 +97,39 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                     binaries = uiState.extractedBinaries,
                     verificationSummary = uiState.verificationSummary,
                     alerts = alerts,
+                    logsCount = uiState.terminalLogs.size,
+                    latestLogEntry = uiState.terminalLogs.lastOrNull(),
+                    isConsoleTabSelected = uiState.currentTab == KitchenTab.CONSOLE,
+                    onToggleConsoleTab = viewModel::toggleConsoleTab,
                     onToggleMode = viewModel::toggleExecutionMode,
                     onRunVerifier = viewModel::runIntelligentCrossVerifier,
                     onRefreshStorage = viewModel::refreshStorageStatusAndFolders
                 )
             },
             bottomBar = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    IntegratedTerminalConsole(
-                        logs = uiState.terminalLogs,
-                        isExpanded = uiState.isTerminalExpanded,
-                        onToggleExpand = viewModel::toggleTerminalExpanded,
-                        onClear = viewModel::clearLogs
-                    )
-                    if (!isWideScreen) {
-                        NavigationBar(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        ) {
-                            KitchenTab.entries.forEach { tab ->
-                                NavigationBarItem(
-                                    selected = uiState.currentTab == tab,
-                                    onClick = { viewModel.selectTab(tab) },
-                                    icon = {
-                                        Icon(
-                                            imageVector = tab.icon(),
-                                            contentDescription = tab.label
-                                        )
-                                    },
-                                    label = {
-                                        Text(
-                                            text = tab.shortLabel(),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    },
-                                    modifier = Modifier.testTag("nav_tab_${tab.route}")
-                                )
-                            }
+                if (!isWideScreen) {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ) {
+                        mainNavigationTabs.forEach { tab ->
+                            NavigationBarItem(
+                                selected = uiState.currentTab == tab,
+                                onClick = { viewModel.selectTab(tab) },
+                                icon = {
+                                    Icon(
+                                        imageVector = tab.icon(),
+                                        contentDescription = tab.label
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = tab.shortLabel(),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                modifier = Modifier.testTag("nav_tab_${tab.route}")
+                            )
                         }
                     }
                 }
@@ -208,6 +210,13 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                             portHistory = portHistory,
                             onExecuteFullAutoPort = viewModel::executeGsiToSystemAutoPort
                         )
+
+                        KitchenTab.CONSOLE -> ConsoleHistoryScreen(
+                            uiState = uiState,
+                            portHistory = portHistory,
+                            onClearLogs = viewModel::clearLogs,
+                            onSelectDecompiledImgAndNavigate = viewModel::selectDecompiledImgAndNavigate
+                        )
                     }
                 }
             }
@@ -221,6 +230,7 @@ private fun KitchenTab.icon(): ImageVector = when (this) {
     KitchenTab.GENERATOR -> Icons.Default.Memory
     KitchenTab.COMPILER -> Icons.Default.Build
     KitchenTab.AUTO_PORTER -> Icons.Default.AccountTree
+    KitchenTab.CONSOLE -> Icons.Default.Terminal
 }
 
 private fun KitchenTab.shortLabel(): String = when (this) {
@@ -229,4 +239,5 @@ private fun KitchenTab.shortLabel(): String = when (this) {
     KitchenTab.GENERATOR -> "Generator"
     KitchenTab.COMPILER -> "Compilation"
     KitchenTab.AUTO_PORTER -> "Porting GSI"
+    KitchenTab.CONSOLE -> "Console"
 }

@@ -287,7 +287,9 @@ class SignProEngine(
         targetRootDir: File,
         onLog: (String) -> Unit
     ): Boolean {
-        val macFile = File(targetRootDir, "etc/selinux/plat_mac_permissions.xml")
+        val sarMac = File(targetRootDir, "system/etc/selinux/plat_mac_permissions.xml")
+        val legacyMac = File(targetRootDir, "etc/selinux/plat_mac_permissions.xml")
+        val macFile = if (File(targetRootDir, "system").isDirectory) sarMac else legacyMac
         macFile.parentFile?.mkdirs()
 
         val roleToSeinfo = mapOf(
@@ -317,7 +319,8 @@ class SignProEngine(
     }
 
     private fun updateBuildPropTags(targetRootDir: File, onLog: (String) -> Unit) {
-        val propFile = File(targetRootDir, "build.prop")
+        val sarProp = File(targetRootDir, "system/build.prop")
+        val propFile = if (sarProp.exists()) sarProp else File(targetRootDir, "build.prop")
         if (propFile.exists()) {
             val updated = propFile.readText().replace("ro.build.tags=test-keys", "ro.build.tags=release-keys")
             propFile.writeText(updated)
@@ -327,7 +330,8 @@ class SignProEngine(
 
     fun readCurrentMacPermissionsXml(targetDecompiledDir: File? = null): String {
         val rootDir = resolveDecompiledDir(targetDecompiledDir)
-        val macFile = File(rootDir, "etc/selinux/plat_mac_permissions.xml")
+        val sarMac = File(rootDir, "system/etc/selinux/plat_mac_permissions.xml")
+        val macFile = if (sarMac.exists()) sarMac else File(rootDir, "etc/selinux/plat_mac_permissions.xml")
         return if (macFile.exists()) macFile.readText() else "<!-- Fichier plat_mac_permissions.xml introuvable dans ${rootDir.name} -->"
     }
 }

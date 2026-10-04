@@ -139,9 +139,9 @@ class RomForgeStorageManager(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
             var count = 0
-            // Export key summary/manifest/APK files cleanly via MediaStore.Downloads without exceeding rate limits
-            val filesToExport = sourceDir.walkTopDown().filter { it.isFile }.take(12).toList()
-            for (file in filesToExport) {
+            // Export all files in the decompiled/modified directory via MediaStore.Downloads
+            val allFiles = sourceDir.walkTopDown().filter { it.isFile }.toList()
+            for (file in allFiles) {
                 val relParent = file.parentFile?.relativeTo(sourceDir)?.path ?: ""
                 val relativePath = if (relParent.isEmpty()) {
                     "${Environment.DIRECTORY_DOWNLOADS}/ROM_FORGE/$subFolderName"
@@ -168,7 +168,7 @@ class RomForgeStorageManager(private val context: Context) {
                 }
             }
             val publicDownloadPath = "/storage/emulated/0/Download/ROM_FORGE/$subFolderName"
-            onLog("[BYPASS-NON-ROOT] $count fichiers exportés sans root vers $publicDownloadPath")
+            onLog("[BYPASS-NON-ROOT] $count/${allFiles.size} fichiers exportés vers $publicDownloadPath")
             return@withContext publicDownloadPath
         }
 

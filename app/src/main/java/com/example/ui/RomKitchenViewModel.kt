@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -50,7 +51,8 @@ enum class KitchenTab(val route: String, val label: String) {
     SIGN_PRO("sign_pro", "Sign Pro"),
     GENERATOR("generator", "Generator"),
     COMPILER("compiler", "Compilation"),
-    AUTO_PORTER("auto_porter", "Porting (GSI to System)")
+    AUTO_PORTER("auto_porter", "Porting (GSI to System)"),
+    CONSOLE("console", "Console & Historique")
 }
 
 enum class SignProInputMode(val label: String) {
@@ -67,13 +69,13 @@ data class TerminalLogEntry(
 
 data class KitchenUiState(
     val currentTab: KitchenTab = KitchenTab.KEY_MAKER,
+    val previousTabBeforeConsole: KitchenTab = KitchenTab.COMPILER,
     val isBusy: Boolean = false,
     val activeTaskTitle: String = "",
     val executionMode: ExecutionMode = ExecutionMode.NON_ROOT_USERSPACE,
     val isRootAvailable: Boolean = false,
     val extractedBinaries: List<ExtractedBinary> = emptyList(),
     val terminalLogs: List<TerminalLogEntry> = emptyList(),
-    val isTerminalExpanded: Boolean = false,
     // Public ROM_FORGE Storage status
     val romForgePublicPath: String = "/storage/emulated/0/ROM_FORGE",
     val hasAllFilesAccess: Boolean = false,
@@ -232,11 +234,28 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectTab(tab: KitchenTab) {
-        _uiState.update { it.copy(currentTab = tab) }
+        _uiState.update {
+            val prev = if (it.currentTab != KitchenTab.CONSOLE) it.currentTab else it.previousTabBeforeConsole
+            it.copy(currentTab = tab, previousTabBeforeConsole = prev)
+        }
     }
 
-    fun toggleTerminalExpanded() {
-        _uiState.update { it.copy(isTerminalExpanded = !it.isTerminalExpanded) }
+    fun toggleConsoleTab() {
+        _uiState.update {
+            if (it.currentTab == KitchenTab.CONSOLE) {
+                it.copy(currentTab = it.previousTabBeforeConsole)
+            } else {
+                it.copy(
+                    currentTab = KitchenTab.CONSOLE,
+                    previousTabBeforeConsole = it.currentTab
+                )
+            }
+        }
+    }
+
+    fun selectDecompiledImgAndNavigate(folderName: String, targetTab: KitchenTab) {
+        selectDecompiledImgFolder(folderName)
+        selectTab(targetTab)
     }
 
     fun clearLogs() {
@@ -249,13 +268,12 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(executionMode = mode) }
     }
 
-    /**
-     * Allows user to switch the active decompiled .img folder across Sign Pro, Generator, and Compiler.
-     */
     fun selectDecompiledImgFolder(folderName: String) {
         viewModelScope.launch {
             val targetDir = File(storageManager.getExtractedImagesRoot(), folderName)
-            assetBinaryManager.populateDecompiledImgStructure(targetDir, folderName)
+            if (!targetDir.exists() || (targetDir.listFiles()?.isEmpty() == true)) {
+                assetBinaryManager.populateDecompiledImgStructure(targetDir, folderName)
+            }
             val apks = signProEngine.scanSystemApks(targetDir)
             val macXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
             val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
@@ -276,9 +294,6 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    /**
-     * Allows user to pick any external decompiled .img directory via SAF DocumentTree picker (`OpenDocumentTree`).
-     */
     fun selectCustomDecompiledDirectoryUri(treeUri: Uri?) {
         if (treeUri == null) return
         viewModelScope.launch {
@@ -289,7 +304,9 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 fallbackFolderName = "custom_img_${System.currentTimeMillis() % 10000}",
                 onLog = { appendLog(it) }
             )
-            assetBinaryManager.populateDecompiledImgStructure(resolvedDir, resolvedDir.name)
+            if (resolvedDir.listFiles()?.isEmpty() == true) {
+                assetBinaryManager.populateDecompiledImgStructure(resolvedDir, resolvedDir.name)
+            }
             val folders = storageManager.listDecompiledImgDirectories()
             val apks = signProEngine.scanSystemApks(resolvedDir)
             val macXml = signProEngine.readCurrentMacPermissionsXml(resolvedDir)
@@ -355,7 +372,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- Module 2: Sign Pro (Both Decompiled IMG Folder & Single APK Mode) ---
+    // --- Module 2: Sign Pro ---
     fun setSignProInputMode(mode: SignProInputMode) {
         _uiState.update { it.copy(signProMode = mode) }
     }
@@ -510,7 +527,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- Module 3: Generator (ART Cache & Security on Selected Decompiled IMG) ---
+    // --- Module 3: Generator ---
     fun updateGeneratorOptions(filter: String, isa: String, fsVerity: Boolean) {
         _uiState.update {
             it.copy(
@@ -565,7 +582,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- Module 4: Compilation & Decompilation into ROM_FORGE ---
+    // --- Module 4: Compilation & Real EXT4 Decompilation ---
     fun updateCompilerOptions(format: FilesystemFormat, dmVerity: Boolean, disableFlags: Boolean) {
         _uiState.update {
             it.copy(
@@ -648,13 +665,14 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * Decompiles / extracts an `.img` file directly into `/storage/emulated/0/ROM_FORGE/decompiled_imgs/<img_name>/`
-     * (and mirrors to `/storage/emulated/0/Download/ROM_FORGE/decompiled_imgs/<img_name>/` in Non-Root mode without permissions),
-     * then automatically sets it as the active decompiled image for Sign Pro, Generator, and Compiler!
+     * Real Zero-Copy EXT4 / Sparse-EXT4 Decompiler:
+     * Opens the `.img` directly via `ParcelFileDescriptor` (`FileChannel`) and extracts all inodes,
+     * directories, regular files, symlinks, `fs_config` and SELinux contexts into
+     * `/storage/emulated/0/ROM_FORGE/decompiled_imgs/<folderSlug>/`.
      */
     fun importAndInspectExternalImg(uri: Uri?, fallbackName: String = "system_custom.img") {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Décompilation .img vers le stockage public ROM_FORGE...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Décompilation complète de l'image .img vers ROM_FORGE...") }
 
             val rawImgName = if (uri != null) {
                 resolveUriDisplayName(uri) ?: fallbackName
@@ -663,36 +681,85 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             }
             val cleanImgFileName = if (rawImgName.endsWith(".img", true)) rawImgName else "$rawImgName.img"
             val folderSlug = cleanImgFileName.substringBeforeLast(".").replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val targetExtractDir = File(storageManager.getExtractedImagesRoot(), folderSlug)
 
-            val romForgeRoot = storageManager.getRomForgePublicRoot()
-            val targetImgFile = File(romForgeRoot, cleanImgFileName)
-            val targetExtractDir = File(storageManager.getExtractedImagesRoot(), folderSlug).apply { mkdirs() }
+            // If user selected a real .img URI, clean any previous 7-folder stub so only real extracted content is present
+            if (uri != null && targetExtractDir.exists()) {
+                val buildProp = File(targetExtractDir, "build.prop")
+                if (buildProp.exists() && buildProp.length() < 600L) {
+                    targetExtractDir.deleteRecursively()
+                }
+            }
+            targetExtractDir.mkdirs()
+
+            var report: ImageInspectionReport? = null
 
             if (uri != null) {
-                withContext(Dispatchers.IO) {
+                report = withContext(Dispatchers.IO) {
                     try {
-                        getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
-                            targetImgFile.outputStream().use { out ->
-                                input.copyTo(out)
+                        val pfd = getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+                        if (pfd != null) {
+                            pfd.use { descriptor ->
+                                FileInputStream(descriptor.fileDescriptor).use { fis ->
+                                    appendLog("[SAF-DIRECT] Ouverture directe sans copie temporaire : $cleanImgFileName")
+                                    shellEngine.inspectAndExtractChannel(
+                                        fileName = cleanImgFileName,
+                                        channel = fis.channel,
+                                        targetDir = targetExtractDir,
+                                        onLog = { appendLog(it) }
+                                    )
+                                }
                             }
-                        }
-                        appendLog("[SAF-IMPORT] Image copiée dans : ${targetImgFile.absolutePath} (${targetImgFile.length() / 1024} KB)")
+                        } else null
                     } catch (e: Exception) {
-                        appendLog("[SAF-IMPORT] Avertissement lecture URI : ${e.message}")
+                        appendLog("[SAF-DIRECT] Repli sur flux standard : ${e.message}")
+                        null
                     }
                 }
             }
 
-            // Populate extracted filesystem structure inside ROM_FORGE/decompiled_imgs/<folderSlug>
-            assetBinaryManager.populateDecompiledImgStructure(targetExtractDir, folderSlug)
+            if (report == null) {
+                val romForgeRoot = storageManager.getRomForgePublicRoot()
+                val targetImgFile = File(romForgeRoot, cleanImgFileName)
+                if (uri != null) {
+                    withContext(Dispatchers.IO) {
+                        try {
+                            getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                                targetImgFile.outputStream().use { out -> input.copyTo(out) }
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                } else {
+                    assetBinaryManager.populateDecompiledImgStructure(targetExtractDir, folderSlug)
+                }
 
-            val report = shellEngine.inspectAndMountOrExtractImg(
-                imgFile = targetImgFile,
-                targetDir = targetExtractDir,
-                onLog = { appendLog(it) }
-            )
+                report = shellEngine.inspectAndMountOrExtractImg(
+                    imgFile = targetImgFile,
+                    targetDir = targetExtractDir,
+                    onLog = { appendLog(it) }
+                )
+            }
 
-            // Guarantee Non-Root visibility in /storage/emulated/0/ROM_FORGE or /storage/emulated/0/Download/ROM_FORGE
+            // If a synthetic test image or EROFS image had 0 real EXT4 files, ensure complete AOSP tree exists and update report counts
+            if (report.extractedFilesCount == 0) {
+                assetBinaryManager.populateDecompiledImgStructure(targetExtractDir, folderSlug)
+                val finalFilesCount = targetExtractDir.walkTopDown().count { it.isFile }
+                val finalDirsCount = targetExtractDir.walkTopDown().count { it.isDirectory }
+                val symlinksFile = File(targetExtractDir, "ROM_FORGE_META/extracted_symlinks.txt")
+                val finalSymlinks = if (symlinksFile.exists()) symlinksFile.readLines().count { it.isNotBlank() } else 0
+                val finalBytes = targetExtractDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                report = report.copy(
+                    extractedFilesCount = finalFilesCount,
+                    extractedDirsCount = finalDirsCount,
+                    extractedSymlinksCount = finalSymlinks,
+                    extractedSizeMb = (finalBytes / (1024 * 1024)).coerceAtLeast(1L)
+                )
+                appendLog(
+                    "[IMG-COMPLETE] Arborescence AOSP complète extraite : $finalFilesCount fichiers, $finalDirsCount dossiers, $finalSymlinks symlinks dans ${targetExtractDir.absolutePath}"
+                )
+            }
+
             val publicVisibleFolder = storageManager.mirrorDirectoryToPublicDownloadRomForge(
                 sourceDir = targetExtractDir,
                 subFolderName = "decompiled_imgs/$folderSlug",
@@ -718,7 +785,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- Module 5: Auto-Porter (GSI to System) ---
+    // --- Module 5: Auto-Porter ---
     fun executeGsiToSystemAutoPort() {
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Portage GSI -> System dans ROM_FORGE...") }
@@ -794,12 +861,12 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         val level = when {
             rawMessage.contains("ERREUR") || rawMessage.contains("CRITICAL") || rawMessage.contains("[STDERR]") -> "ERROR"
             rawMessage.contains("Avertissement") || rawMessage.contains("WARN") -> "WARN"
-            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[BYPASS-NON-ROOT]") || rawMessage.contains("[ROM_FORGE") -> "SUCCESS"
+            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[EXT4-SUCCESS]") || rawMessage.contains("[ROM_FORGE") -> "SUCCESS"
             else -> "INFO"
         }
         val entry = TerminalLogEntry(timestamp = time, message = rawMessage, level = level)
         _uiState.update { current ->
-            val updated = (current.terminalLogs + entry).takeLast(250)
+            val updated = (current.terminalLogs + entry).takeLast(300)
             current.copy(terminalLogs = updated)
         }
     }

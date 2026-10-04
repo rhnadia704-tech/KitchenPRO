@@ -130,13 +130,19 @@ fun CompilerScreen(
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = "Image Décompilée : ${rep.fileName} [${rep.format}] (${rep.extractedFilesCount} fichiers)",
+                                    text = "Image Décompilée : ${rep.fileName} [${rep.format}]",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
-                                    text = "Dossier de sortie visible : ${rep.mountPointUsed}",
+                                    text = "Extraits : ${rep.extractedFilesCount} fichiers • ${rep.extractedDirsCount} dossiers • ${rep.extractedSymlinksCount} symlinks (${rep.extractedSizeMb} MB)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Text(
+                                    text = "Sortie : ${rep.mountPointUsed}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
