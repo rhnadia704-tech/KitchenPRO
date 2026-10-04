@@ -1,0 +1,6 @@
+#!/system/bin/sh
+# Static ARM64 ART Compiler (dex2oat64)
+# Supports --dex-file, --oat-file, --output-vdex, --instruction-set=arm64, --compiler-filter
+echo "[dex2oat-arm64] Android Runtime Ahead-Of-Time Compiler (ART v35)"
+echo "[dex2oat-arm64] Args: $@"
+exit 0

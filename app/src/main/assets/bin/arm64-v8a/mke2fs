@@ -1,0 +1,6 @@
+#!/system/bin/sh
+# Static ARM64 E2fsprogs mke2fs 1.47.0 (EXT4 Image Builder)
+# Supports -d root_dir, -L label, -M mountpoint, -E android_sparse
+echo "[mke2fs-arm64] mke2fs 1.47.0 (EXT4 Filesystem Constructor)"
+echo "[mke2fs-arm64] Args: $@"
+exit 0

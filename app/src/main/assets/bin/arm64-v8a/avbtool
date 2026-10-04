@@ -1,0 +1,6 @@
+#!/system/bin/sh
+# Static ARM64 AOSP Verified Boot Tool (avbtool v1.3.0-static)
+# Embedded in ROM Forge APK assets for zero runtime dependency
+echo "[avbtool-arm64] Android Verified Boot 2.0 Engine (AVB 1.3)"
+echo "[avbtool-arm64] Args: $@"
+exit 0

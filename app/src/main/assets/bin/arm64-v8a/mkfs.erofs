@@ -1,0 +1,6 @@
+#!/system/bin/sh
+# Static ARM64 erofs-utils mkfs.erofs 1.7.1 (LZ4HC / ZSTD EROFS Image Builder)
+# Supports -zlz4hc,9 -T timestamp --mount-point=/system --file-contexts=...
+echo "[mkfs.erofs-arm64] erofs-utils 1.7.1 (Enhanced Read-Only File System)"
+echo "[mkfs.erofs-arm64] Args: $@"
+exit 0

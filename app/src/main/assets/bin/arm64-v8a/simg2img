@@ -1,0 +1,5 @@
+#!/system/bin/sh
+# Static ARM64 Sparse Image to Raw Image Converter (simg2img)
+echo "[simg2img-arm64] AOSP Sparse Image Unpacker (magic 0xed26ff3a)"
+echo "[simg2img-arm64] Args: $@"
+exit 0

@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">ROM Forge</string>
+    <string name="app_subtitle">AOSP Reverse-Compiler &amp; Hybrid ROM Kitchen</string>
+    <string name="nav_key_maker">Key Maker</string>
+    <string name="nav_sign_pro">Sign Pro</string>
+    <string name="nav_generator">Generator</string>
+    <string name="nav_compiler">Compilation</string>
+    <string name="nav_porter">Porting (GSI to System)</string>
+    <string name="mode_root">Mode Root (Loopback / Kernel Mount)</string>
+    <string name="mode_non_root">Mode Non-Root (SAF / Userspace Engine)</string>
+    <string name="terminal_title">Console Système &amp; Vérificateur Croisé</string>
+    <string name="btn_clear_logs">Effacer</string>
+    <string name="btn_run_verifier">Diagnostic Croisé</string>
+</resources>

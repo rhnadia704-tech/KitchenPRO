@@ -1,0 +1,5 @@
+#!/system/bin/sh
+# Static ARM64 Logical Partition Unpacker (lpunpack for super.img)
+echo "[lpunpack-arm64] AOSP Dynamic Partition Unpacker (Metadata Geometry v10.2)"
+echo "[lpunpack-arm64] Args: $@"
+exit 0

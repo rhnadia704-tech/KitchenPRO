@@ -1,0 +1,6 @@
+{
+  "name": "ROM Forge",
+  "description": "AOSP Reverse-Compiler & Android ROM Kitchen for Root/Non-Root IMG modification, RSA Key Maker, APK Signer, ART Dex2oat Generator, AVB/EROFS/EXT4 Compiler, and GSI-to-System Auto-Porter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

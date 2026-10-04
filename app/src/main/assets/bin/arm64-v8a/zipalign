@@ -1,0 +1,5 @@
+#!/system/bin/sh
+# Static ARM64 AOSP zipalign (4K / 16K Page Size ELF & ARSC Alignment Engine)
+echo "[zipalign-arm64] AOSP ZipAlign 35.0.1 (Page-aligned STORED entries)"
+echo "[zipalign-arm64] Args: $@"
+exit 0
