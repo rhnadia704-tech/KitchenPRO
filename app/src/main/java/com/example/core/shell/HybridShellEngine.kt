@@ -1,5 +1,6 @@
 package com.example.core.shell
 
+import com.example.core.img.ErofsUserspaceExtractor
 import com.example.core.img.Ext4UserspaceExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -41,6 +42,7 @@ data class ImageInspectionReport(
 class HybridShellEngine(private val binDir: File, private val workspaceDir: File) {
 
     private val ext4Extractor = Ext4UserspaceExtractor()
+    private val erofsExtractor = ErofsUserspaceExtractor()
 
     @Volatile
     var currentMode: ExecutionMode = ExecutionMode.NON_ROOT_USERSPACE
@@ -53,7 +55,19 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
     suspend fun probeRootAccess(): Boolean = withContext(Dispatchers.IO) {
         try {
             val buildTags = android.os.Build.TAGS ?: ""
-            if (!buildTags.contains("test-keys") && !File("/system/bin/su").exists()) {
+            if (!buildTags.contains("test-keys")) {
+                isRootAvailableOnDevice = false
+                return@withContext false
+            }
+            val suCandidates = listOf("/system/xbin/su", "/system/bin/su", "/sbin/su")
+            val hasSu = suCandidates.any {
+                try {
+                    File(it).canExecute()
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (!hasSu) {
                 isRootAvailableOnDevice = false
                 return@withContext false
             }
@@ -182,7 +196,29 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
             else -> "0xEF53"
         }
 
-        onLog("[IMG-PARSER] Lecture directe de $fileName (${totalSize / 1024} KB) | Magic=$magicHex")
+        onLog("[UKA-PARSER] Lecture directe de $fileName (${totalSize / 1024} KB) | Magic=$magicHex")
+
+        if (isErofs) {
+            val erofsResult = erofsExtractor.extractErofsFromChannel(
+                channel = channel,
+                outputDir = targetDir,
+                onProgressLog = onLog
+            )
+            if (erofsResult.extractedFilesCount > 0) {
+                return@withContext ImageInspectionReport(
+                    fileName = fileName,
+                    sizeBytes = totalSize,
+                    format = erofsResult.formatDetected,
+                    magicHex = magicHex,
+                    volumeLabel = erofsResult.volumeName,
+                    mountPointUsed = targetDir.absolutePath,
+                    extractedDirsCount = erofsResult.extractedDirsCount,
+                    extractedFilesCount = erofsResult.extractedFilesCount,
+                    extractedSymlinksCount = erofsResult.extractedSymlinksCount,
+                    extractedSizeMb = (erofsResult.totalExtractedBytes / (1024 * 1024)).coerceAtLeast(1L)
+                )
+            }
+        }
 
         if (isExt4 || isSparse) {
             val extResult = ext4Extractor.extractImageFromChannel(
@@ -203,6 +239,28 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
                     extractedSymlinksCount = extResult.extractedSymlinksCount,
                     extractedSizeMb = (extResult.totalExtractedBytes / (1024 * 1024)).coerceAtLeast(1L)
                 )
+            }
+            // If it was a Sparse image wrapping an EROFS filesystem, try ErofsUserspaceExtractor via SparseAwareBlockReader
+            if (isSparse) {
+                val sparseErofsResult = erofsExtractor.extractErofsFromChannel(
+                    channel = channel,
+                    outputDir = targetDir,
+                    onProgressLog = onLog
+                )
+                if (sparseErofsResult.extractedFilesCount > 0) {
+                    return@withContext ImageInspectionReport(
+                        fileName = fileName,
+                        sizeBytes = totalSize,
+                        format = sparseErofsResult.formatDetected,
+                        magicHex = "0xED26FF3A -> 0xE0F5E1E2 (Sparse EROFS)",
+                        volumeLabel = sparseErofsResult.volumeName,
+                        mountPointUsed = targetDir.absolutePath,
+                        extractedDirsCount = sparseErofsResult.extractedDirsCount,
+                        extractedFilesCount = sparseErofsResult.extractedFilesCount,
+                        extractedSymlinksCount = sparseErofsResult.extractedSymlinksCount,
+                        extractedSizeMb = (sparseErofsResult.totalExtractedBytes / (1024 * 1024)).coerceAtLeast(1L)
+                    )
+                }
             }
         }
 

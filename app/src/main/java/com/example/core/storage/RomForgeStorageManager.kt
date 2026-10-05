@@ -178,7 +178,7 @@ class RomForgeStorageManager(private val context: Context) {
             val resolver = context.contentResolver
             var count = 0
             val allFiles = sourceDir.walkTopDown().filter { it.isFile }.toList()
-            // Export key summary/APK/manifest files up to 15 items + 1 complete ZIP archive so MediaProvider never triggers audit rate-limiting
+            // Export up to 3 top-priority summary files so MediaProvider never triggers SELinux audit rate-limiting
             val priorityFiles = allFiles.sortedBy {
                 when {
                     it.name.endsWith(".img") || it.name.endsWith(".json") || it.name.endsWith(".txt") -> 0
@@ -186,7 +186,7 @@ class RomForgeStorageManager(private val context: Context) {
                     it.name.endsWith(".apk") -> 2
                     else -> 3
                 }
-            }.take(12)
+            }.take(3)
 
             for (file in priorityFiles) {
                 val relParent = file.parentFile?.relativeTo(sourceDir)?.path ?: ""

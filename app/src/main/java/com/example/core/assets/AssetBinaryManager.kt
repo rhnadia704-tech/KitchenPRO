@@ -539,8 +539,7 @@ class AssetBinaryManager(
                 "/$rel $ctx"
             }
         )
-        File(targetDir, "ROM_FORGE_META/extracted_symlinks.txt").writeText(
-            """
+        val symlinksText = """
             /init -> /system/bin/init
             /bin -> /system/bin
             /etc -> /system/etc
@@ -558,7 +557,18 @@ class AssetBinaryManager(
             /system/bin/ps -> toybox
             /system/bin/rm -> toybox
             /system/bin/umount -> toybox
-            """.trimIndent()
+        """.trimIndent()
+        File(targetDir, "ROM_FORGE_META/extracted_symlinks.txt").writeText(symlinksText)
+
+        com.example.core.img.UkaConfigHelper.writeUkaAndRomForgeConfigs(
+            outputDir = targetDir,
+            partitionName = "system",
+            filesystemType = "EXT4",
+            blockSize = 4096,
+            totalSizeBytes = 64L * 1024 * 1024,
+            fsConfigLines = File(targetDir, "ROM_FORGE_META/extracted_fs_config.txt").readLines(),
+            fileContextsLines = File(targetDir, "ROM_FORGE_META/extracted_file_contexts.txt").readLines(),
+            symlinksLines = symlinksText.lines()
         )
         File(targetDir, "ROM_FORGE_META/aosp_tree_complete.marker").writeText("COMPLETE_AOSP_TREE_V2")
     }

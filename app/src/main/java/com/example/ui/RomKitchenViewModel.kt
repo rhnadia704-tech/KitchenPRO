@@ -990,14 +990,26 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     verifyApkSignaturesAndExportReports(null)
                 }
                 trimmed.startsWith("getprop") -> {
-                    withContext(Dispatchers.IO) {
-                        try {
-                            val args = trimmed.split(Regex("\\s+"))
-                            val proc = ProcessBuilder(args).redirectErrorStream(true).start()
-                            val lines = proc.inputStream.bufferedReader().readLines().take(25)
-                            lines.forEach { appendLog(it) }
-                        } catch (e: Exception) {
-                            appendLog("[SHELL-ERR] ${e.message}")
+                    val propFilter = trimmed.removePrefix("getprop").trim()
+                    val safeBuildProps = mapOf(
+                        "ro.product.brand" to android.os.Build.BRAND,
+                        "ro.product.device" to android.os.Build.DEVICE,
+                        "ro.product.model" to android.os.Build.MODEL,
+                        "ro.product.name" to android.os.Build.PRODUCT,
+                        "ro.board.platform" to android.os.Build.BOARD,
+                        "ro.hardware" to android.os.Build.HARDWARE,
+                        "ro.build.version.release" to android.os.Build.VERSION.RELEASE,
+                        "ro.build.version.sdk" to android.os.Build.VERSION.SDK_INT.toString(),
+                        "ro.build.tags" to (android.os.Build.TAGS ?: "release-keys"),
+                        "ro.build.fingerprint" to (android.os.Build.FINGERPRINT ?: "")
+                    )
+                    if (propFilter.isNotEmpty() && safeBuildProps.containsKey(propFilter)) {
+                        appendLog(safeBuildProps[propFilter] ?: "")
+                    } else {
+                        safeBuildProps.forEach { (k, v) ->
+                            if (propFilter.isEmpty() || k.contains(propFilter, true)) {
+                                appendLog("[$k]: [$v]")
+                            }
                         }
                     }
                 }

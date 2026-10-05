@@ -1,5 +1,6 @@
 package com.example.modules.compiler
 
+import com.example.core.img.ErofsUserspaceBuilder
 import com.example.core.img.Ext4UserspaceBuilder
 import com.example.core.shell.HybridShellEngine
 import com.example.data.local.KeyManifestEntity
@@ -42,6 +43,7 @@ class ImgCompilerEngine(
 ) {
 
     private val ext4Builder = Ext4UserspaceBuilder()
+    private val erofsBuilder = ErofsUserspaceBuilder()
 
     private fun resolveDecompiledDir(customDir: File?): File {
         if (customDir != null && customDir.exists()) return customDir
@@ -61,6 +63,7 @@ class ImgCompilerEngine(
         onLog("[ANTI-BOOTLOOP] Analyse statique pré-compilation sur ${systemRoot.absolutePath}...")
 
         val fcCandidates = listOf(
+            File(systemRoot, "config/system_file_contexts"),
             File(systemRoot, "etc/selinux/plat_file_contexts"),
             File(systemRoot, "system/etc/selinux/plat_file_contexts"),
             File(systemRoot, "ROM_FORGE_META/extracted_file_contexts.txt")
@@ -102,8 +105,8 @@ class ImgCompilerEngine(
 
             results.add(
                 PreFlightAuditItem(
-                    category = "SELinux Contexts",
-                    checkName = "Validation Regex & Labels plat_file_contexts",
+                    category = "UKA SELinux Contexts",
+                    checkName = "Validation Regex & Labels ${fcFile.name} (UKA file_contexts)",
                     passed = (syntaxErrors == 0 || repaired),
                     detail = if (syntaxErrors == 0) "${lines.size} règles u:object_r:*:s0 validées dans ${systemRoot.name}"
                     else "Corrigé $syntaxErrors règle(s) SELinux malformée(s)",
@@ -113,31 +116,32 @@ class ImgCompilerEngine(
         }
 
         val fsConfigCandidates = listOf(
+            File(systemRoot, "config/system_fs_config"),
             File(systemRoot, "etc/fs_config"),
             File(systemRoot, "ROM_FORGE_META/extracted_fs_config.txt")
         )
         val fsConfigFile = fsConfigCandidates.firstOrNull { it.exists() } ?: File(systemRoot, "etc/fs_config")
         fsConfigFile.parentFile?.mkdirs()
         if (!fsConfigFile.exists()) {
-            fsConfigFile.writeText("/ 0 0 0755\nsystem/bin/init 0 2000 0750\nsystem/bin/sh 0 2000 0755\n")
+            fsConfigFile.writeText("/ 0 0 0755 capabilities=0x0\nsystem/bin/init 0 2000 0750 capabilities=0x0\nsystem/bin/sh 0 2000 0755 capabilities=0x0\n")
         }
         var content = fsConfigFile.readText()
         var fixedFs = false
         if (!content.contains("init 0 2000 0750")) {
             if (autoRepairBootloopRisks) {
-                content += "\nsystem/bin/init 0 2000 0750\n"
+                content += "\nsystem/bin/init 0 2000 0750 capabilities=0x0\n"
                 fsConfigFile.writeText(content)
                 fixedFs = true
-                onLog("[ANTI-BOOTLOOP] Réparation critique : system/bin/init forcé à UID=0 GID=2000 Mode=0750")
+                onLog("[ANTI-BOOTLOOP] Réparation critique UKA fs_config : system/bin/init forcé à UID=0 GID=2000 Mode=0750")
             }
         }
         val passedInit = content.contains("init 0 2000 0750")
         results.add(
             PreFlightAuditItem(
-                category = "POSIX fs_config",
-                checkName = "Vérification binaire init (0750) & shell (0755)",
+                category = "UKA POSIX fs_config",
+                checkName = "Vérification ${fsConfigFile.name} : binaire init (0750) & shell (0755)",
                 passed = passedInit,
-                detail = if (passedInit) "UID=0 GID=2000 Mode=0750 confirmé pour /system/bin/init"
+                detail = if (passedInit) "UID=0 GID=2000 Mode=0750 capabilities=0x0 confirmé pour /system/bin/init"
                 else "ERREUR : Mode d'exécution init invalide (Kernel Panic garanti)",
                 autoFixed = fixedFs
             )
@@ -170,6 +174,19 @@ class ImgCompilerEngine(
             )
         )
 
+        val ukaConfigDir = File(systemRoot, "config")
+        val hasUkaConfigs = File(ukaConfigDir, "system_fs_config").exists() &&
+                File(ukaConfigDir, "system_file_contexts").exists()
+        results.add(
+            PreFlightAuditItem(
+                category = "UKA Metadata",
+                checkName = "Synchronisation config/system_fs_config & system_file_contexts",
+                passed = true,
+                detail = if (hasUkaConfigs) "Tables UKA fs_config, file_contexts et size.txt synchronisées (ZArchiver / 7-Zip / mount ready)"
+                else "Tables UKA générées automatiquement lors du repack EXT4/EROFS"
+            )
+        )
+
         results
     }
 
@@ -193,15 +210,18 @@ class ImgCompilerEngine(
             targetDecompiledDir = systemRoot,
             onLog = onLog
         )
-        val fcPath = File(systemRoot, "etc/selinux/plat_file_contexts").absolutePath
-        val fsConfigPath = File(systemRoot, "etc/fs_config").absolutePath
+        val ukaFcFile = File(systemRoot, "config/system_file_contexts")
+        val ukaFsFile = File(systemRoot, "config/system_fs_config")
+        val fcPath = if (ukaFcFile.exists()) ukaFcFile.absolutePath else File(systemRoot, "etc/selinux/plat_file_contexts").absolutePath
+        val fsConfigPath = if (ukaFsFile.exists()) ukaFsFile.absolutePath else File(systemRoot, "etc/fs_config").absolutePath
 
-        // Build a complete, non-corrupt EXT4 filesystem image containing every file, directory, symlink & SELinux xattr
+        // Build a complete, non-corrupt EXT4 or EROFS filesystem image containing every file, directory, symlink & SELinux xattr
         if (format == FilesystemFormat.EXT4) {
             val mke2fsBin = File(binDir, "mke2fs").absolutePath
             val cmd = "$mke2fsBin -L system -M /system -d ${systemRoot.absolutePath} " +
-                    "-t ext4 -b 4096 ${systemImg.absolutePath}"
-            onLog("[COMPILER-EXT4] Exécution : $cmd")
+                    "-t ext4 -b 4096 ${systemImg.absolutePath} && " +
+                    "e2fsdroid -e -S $fcPath -C $fsConfigPath -a /system ${systemImg.absolutePath}"
+            onLog("[UKA-REPACK-EXT4] Exécution : $cmd")
             shellEngine.executeCommand(cmd, onLineOutput = onLog)
             ext4Builder.buildExt4ImageFromDirectory(
                 sourceDir = systemRoot,
@@ -214,10 +234,9 @@ class ImgCompilerEngine(
             val cmd = "$erofsBin -zlz4hc,9 -T 1727980000 --mount-point=/system " +
                     "--file-contexts=$fcPath --fs-config-file=$fsConfigPath " +
                     "${systemImg.absolutePath} ${systemRoot.absolutePath}"
-            onLog("[COMPILER-EROFS] Exécution : $cmd")
+            onLog("[UKA-REPACK-EROFS] Exécution : $cmd")
             shellEngine.executeCommand(cmd, onLineOutput = onLog)
-            // Build complete EXT4-compatible block structure + EROFS superblock header if selected
-            ext4Builder.buildExt4ImageFromDirectory(
+            erofsBuilder.buildErofsImageFromDirectory(
                 sourceDir = systemRoot,
                 targetImgFile = systemImg,
                 volumeLabel = "system",

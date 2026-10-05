@@ -36,6 +36,9 @@ private data class SparseSegment(
 class SparseAwareBlockReader(private val channel: FileChannel) {
     val isSparse: Boolean
     private val segments = mutableListOf<SparseSegment>()
+    private var totalVirtualSize: Long = 0L
+
+    fun virtualSize(): Long = if (isSparse) totalVirtualSize else channel.size()
 
     init {
         val headerBuf = ByteBuffer.allocate(28).order(ByteOrder.LITTLE_ENDIAN)
@@ -105,8 +108,10 @@ class SparseAwareBlockReader(private val channel: FileChannel) {
                 virtPos += virtLen
                 physPos += totalSzBytes
             }
+            totalVirtualSize = virtPos
         } else {
             isSparse = false
+            totalVirtualSize = channel.size()
         }
     }
 
@@ -625,18 +630,20 @@ class Ext4UserspaceExtractor {
         onProgressLog("[EXT4-EXTRACT] Lecture de la table d'inodes depuis la racine (Inode #2)...")
         walkDirectory(dirInodeNum = 2L, relPath = "", depth = 0)
 
-        // Save extracted metadata (fs_config, file_contexts, symlinks) inside ROM_FORGE/decompiled_imgs/<name>/CONFIG_META/
-        val metaDir = File(outputDir, "ROM_FORGE_META").apply { mkdirs() }
-        File(metaDir, "extracted_fs_config.txt").writeText(fsConfigLines.joinToString("\n"))
-        if (fileContextsLines.isNotEmpty()) {
-            File(metaDir, "extracted_file_contexts.txt").writeText(fileContextsLines.joinToString("\n"))
-        }
-        if (symlinksLines.isNotEmpty()) {
-            File(metaDir, "extracted_symlinks.txt").writeText(symlinksLines.joinToString("\n"))
-        }
+        // Save UKA-compatible config/<partition>_fs_config, config/<partition>_file_contexts, config/<partition>_size.txt & ROM_FORGE_META/
+        UkaConfigHelper.writeUkaAndRomForgeConfigs(
+            outputDir = outputDir,
+            partitionName = volumeLabel,
+            filesystemType = formatName,
+            blockSize = blockSize,
+            totalSizeBytes = totalBlocks * blockSize,
+            fsConfigLines = fsConfigLines,
+            fileContextsLines = fileContextsLines,
+            symlinksLines = symlinksLines
+        )
 
         onProgressLog(
-            "[EXT4-SUCCESS] Décompilation complète terminée : $filesExtracted fichiers, $dirsExtracted dossiers, $symlinksExtracted symlinks (${bytesExtracted / (1024 * 1024)} MB) dans ${outputDir.absolutePath}"
+            "[UKA-EXT4-SUCCESS] Décompilation complète terminée : $filesExtracted fichiers, $dirsExtracted dossiers, $symlinksExtracted symlinks (${bytesExtracted / (1024 * 1024)} MB) + config/${volumeLabel}_fs_config & ${volumeLabel}_file_contexts dans ${outputDir.absolutePath}"
         )
 
         Ext4ExtractionResult(

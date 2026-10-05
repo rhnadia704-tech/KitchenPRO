@@ -82,12 +82,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "1. DÉCOMPILATEUR .IMG -> ROM_FORGE/UNPACK",
+                                text = "1. DÉCOMPILATEUR UKA (.IMG EXT4 / EROFS / SPARSE) -> ROM_FORGE/UNPACK",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Extrait l'intégralité de vos fichiers .img dans /storage/emulated/0/ROM_FORGE/UNPACK/<nom_img>/ sans root",
+                                text = "Extrait l'arborescence complète + config/<part>_fs_config, <part>_file_contexts & symlinks dans /storage/emulated/0/ROM_FORGE/UNPACK/<nom_img>/ (style blackeangel/UKA)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -182,12 +182,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "3. RECONSTRUCTION .IMG & VBMETA -> ROM_FORGE/PACKED",
+                                text = "3. REPACKER UKA (.IMG EXT4 / EROFS + VBMETA) -> ROM_FORGE/PACKED",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Compile 'UNPACK/${uiState.selectedDecompiledImgName}' en image EXT4/EROFS valide + vbmeta.img dans /storage/emulated/0/ROM_FORGE/PACKED/",
+                                text = "Reconstruit 'UNPACK/${uiState.selectedDecompiledImgName}' avec multi-groupes 32768 blocs, bitmaps d'inodes/blocs complets et tables UKA (100% lisible dans ZArchiver / 7-Zip / Linux mount)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

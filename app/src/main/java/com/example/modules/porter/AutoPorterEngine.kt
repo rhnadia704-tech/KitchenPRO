@@ -242,52 +242,30 @@ class AutoPorterEngine(private val workspaceDir: File) {
     }
 
     /**
-     * Zero-Root Host Android Hardware Property & VINTF Scanner (SELinux Audit-Safe):
-     * Reads public system properties via `android.os.SystemProperties` reflection and `android.os.Build`
-     * without spawning `getprop` (which dumps restricted SELinux properties and triggers `E/audit: rate limit exceeded`)
-     * or probing restricted `/vendor/build.prop` / `/odm/etc/build.prop` files.
+     * Zero-Root Host Android Hardware Property & VINTF Scanner (100% SELinux Audit-Safe):
+     * Uses strictly public `android.os.Build` fields without invoking hidden `android.os.SystemProperties`
+     * on `vendor_*` / `persist.vendor.*` SELinux contexts (which triggers kernel `avc: denied { read }` and
+     * `E/audit: rate limit exceeded` on non-root devices).
      */
     private fun probeLiveAndroidHostProperties(): Map<String, String> {
         val props = mutableMapOf<String, String>()
-        val safeKeys = listOf(
-            "ro.product.vendor.brand",
-            "ro.product.vendor.device",
-            "ro.product.vendor.model",
-            "ro.product.vendor.name",
-            "ro.board.platform",
-            "ro.hardware",
-            "ro.hardware.fp.fod",
-            "ro.hardware.fp.fod.location.x",
-            "ro.hardware.fp.fod.location.y",
-            "ro.hardware.fp.fod.size",
-            "persist.vendor.sys.fp.fod.location.X_Y",
-            "persist.vendor.sys.fp.fod.size.width_height",
-            "persist.vendor.sys.fp.fod.hbm.node",
-            "persist.sys.phh.fod.xiaomi"
-        )
-        try {
-            val sysPropClass = Class.forName("android.os.SystemProperties")
-            val getMethod = sysPropClass.getMethod("get", String::class.java, String::class.java)
-            for (key in safeKeys) {
-                val value = (getMethod.invoke(null, key, "") as? String)?.trim().orEmpty()
-                if (value.isNotEmpty()) {
-                    props[key] = value
-                }
-            }
-        } catch (_: Exception) {
-        }
-
-        if (!props.containsKey("ro.product.vendor.brand") && Build.BRAND.isNotBlank() && Build.BRAND != "generic") {
+        if (Build.BRAND.isNotBlank() && Build.BRAND != "generic") {
             props["ro.product.vendor.brand"] = Build.BRAND
         }
-        if (!props.containsKey("ro.product.vendor.device") && Build.DEVICE.isNotBlank() && Build.DEVICE != "generic") {
+        if (Build.DEVICE.isNotBlank() && Build.DEVICE != "generic") {
             props["ro.product.vendor.device"] = Build.DEVICE
         }
-        if (!props.containsKey("ro.product.vendor.model") && Build.MODEL.isNotBlank() && !Build.MODEL.contains("sdk", true)) {
+        if (Build.MODEL.isNotBlank() && !Build.MODEL.contains("sdk", true)) {
             props["ro.product.vendor.model"] = Build.MODEL
         }
-        if (!props.containsKey("ro.board.platform") && Build.BOARD.isNotBlank() && Build.BOARD != "unknown") {
+        if (Build.PRODUCT.isNotBlank() && Build.PRODUCT != "generic") {
+            props["ro.product.vendor.name"] = Build.PRODUCT
+        }
+        if (Build.BOARD.isNotBlank() && Build.BOARD != "unknown") {
             props["ro.board.platform"] = Build.BOARD
+        }
+        if (Build.HARDWARE.isNotBlank() && Build.HARDWARE != "unknown") {
+            props["ro.hardware"] = Build.HARDWARE
         }
         return props
     }
