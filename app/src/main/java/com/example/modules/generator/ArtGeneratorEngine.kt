@@ -1,5 +1,6 @@
 package com.example.modules.generator
 
+import com.example.core.img.AospTopologyResolver
 import com.example.core.shell.HybridShellEngine
 import com.example.data.local.ArtCacheEntity
 import com.example.data.local.KeyManifestEntity
@@ -141,7 +142,8 @@ class ArtGeneratorEngine(
         onLog: (String) -> Unit
     ): Boolean {
         if (activeKeys.isEmpty()) return false
-        val securityDir = File(systemRoot, "etc/security").apply { mkdirs() }
+        val topology = AospTopologyResolver.inspectAndResolve(systemRoot, autoHealSarConflicts = true, onLog = onLog)
+        val securityDir = File(topology.etcDir, "security").apply { mkdirs() }
         val otaZip = File(securityDir, "otacerts.zip")
 
         ZipOutputStream(otaZip.outputStream()).use { zos ->
@@ -154,7 +156,8 @@ class ArtGeneratorEngine(
                 }
             }
         }
-        onLog("[SECURITY-SYNC] ${otaZip.absolutePath} reconstruit avec ${activeKeys.size} certificats X.509")
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(systemRoot, listOf(otaZip), null)
+        onLog("[SECURITY-SYNC] ${topology.systemPrefixRel}etc/security/otacerts.zip reconstruit avec ${activeKeys.size} certificats X.509")
         return true
     }
 

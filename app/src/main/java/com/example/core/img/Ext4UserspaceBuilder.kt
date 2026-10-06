@@ -88,6 +88,13 @@ class Ext4UserspaceBuilder {
 
         val cleanVolume = volumeLabel.trim().lowercase().ifEmpty { "system" }
 
+        // 0. Autonomously inspect and heal SAR vs Flat partition topology before building EXT4
+        AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = sourceDir,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+
         // 1. Load UKA `config/<part>_fs_config` + `ROM_FORGE_META/extracted_fs_config.txt` + `etc/fs_config`
         val fsConfigMap = loadFsConfigMap(sourceDir, cleanVolume)
         val fileContextsMap = loadFileContextsMap(sourceDir, cleanVolume)

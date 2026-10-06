@@ -1,5 +1,6 @@
 package com.example.modules.compiler
 
+import com.example.core.img.AospTopologyResolver
 import com.example.core.img.ErofsUserspaceBuilder
 import com.example.core.img.Ext4UserspaceBuilder
 import com.example.core.shell.HybridShellEngine
@@ -62,13 +63,31 @@ class ImgCompilerEngine(
 
         onLog("[ANTI-BOOTLOOP] Analyse statique pré-compilation sur ${systemRoot.absolutePath}...")
 
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = systemRoot,
+            autoHealSarConflicts = autoRepairBootloopRisks,
+            onLog = onLog
+        )
+        results.add(
+            PreFlightAuditItem(
+                category = "Topologie AOSP / SAR",
+                checkName = "Architecture ${if (topology.isSarLayout) "SAR (System-As-Root /system/...)" else "Plate (/...)"}",
+                passed = true,
+                detail = if (topology.healedConflicts.isNotEmpty()) {
+                    "Auto-corrigé : ${topology.healedConflicts.joinToString(" | ")}"
+                } else {
+                    topology.layoutLabel
+                },
+                autoFixed = topology.healedConflicts.isNotEmpty()
+            )
+        )
+
         val fcCandidates = listOf(
             File(systemRoot, "config/system_file_contexts"),
-            File(systemRoot, "etc/selinux/plat_file_contexts"),
-            File(systemRoot, "system/etc/selinux/plat_file_contexts"),
+            File(topology.selinuxDir, "plat_file_contexts"),
             File(systemRoot, "ROM_FORGE_META/extracted_file_contexts.txt")
         )
-        val fcFile = fcCandidates.firstOrNull { it.exists() } ?: File(systemRoot, "etc/selinux/plat_file_contexts")
+        val fcFile = fcCandidates.firstOrNull { it.exists() } ?: File(topology.selinuxDir, "plat_file_contexts")
         if (fcFile.exists()) {
             val lines = fcFile.readLines().toMutableList()
             var syntaxErrors = 0

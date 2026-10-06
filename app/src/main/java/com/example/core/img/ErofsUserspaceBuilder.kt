@@ -58,6 +58,13 @@ class ErofsUserspaceBuilder {
         targetImgFile.parentFile?.mkdirs()
         if (targetImgFile.exists()) targetImgFile.delete()
 
+        // Autonomously inspect and heal SAR vs Flat partition topology before building EROFS
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = sourceDir,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+
         val allNodes = mutableListOf<PlannedErofsNode>()
         val rootNode = PlannedErofsNode(
             nid = 0,
@@ -107,6 +114,30 @@ class ErofsUserspaceBuilder {
                     )
                     parentNode.children.add(node)
                     allNodes.add(node)
+                }
+            }
+
+            // Attach symbolic links belonging to this directory (e.g. /product -> /system/product on SAR images)
+            val dirSymlinks = topology.symlinkMappings.filter { (linkPath, _) ->
+                val parentPath = linkPath.substringBeforeLast("/", "")
+                parentPath == relPrefix && parentNode.children.none { it.name == linkPath.substringAfterLast("/") }
+            }
+            for ((linkRel, linkTarget) in dirSymlinks) {
+                val linkName = linkRel.substringAfterLast("/")
+                if (linkName.isNotEmpty()) {
+                    val symNode = PlannedErofsNode(
+                        relPath = linkRel,
+                        name = linkName,
+                        mode = 0xA1FF, // 0120777 symlink
+                        uid = 0,
+                        gid = 0,
+                        isDir = false,
+                        isSymlink = true,
+                        symlinkTarget = linkTarget,
+                        payloadSize = linkTarget.toByteArray(Charsets.UTF_8).size.toLong()
+                    )
+                    parentNode.children.add(symNode)
+                    allNodes.add(symNode)
                 }
             }
         }

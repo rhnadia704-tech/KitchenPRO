@@ -1,5 +1,6 @@
 package com.example.core.verifier
 
+import com.example.core.img.AospTopologyResolver
 import com.example.data.local.KeyManifestEntity
 import com.example.data.local.VerificationAlertEntity
 import kotlinx.coroutines.Dispatchers
@@ -46,15 +47,35 @@ class CrossVerifierEngine(private val workspaceDir: File) {
         val unpackedName = systemRoot.name
         onLog("[VERIFIER] Audit croisé AOSP sur l'image décompilée UNPACK/$unpackedName...")
 
+        // 0. Inspect and heal SAR vs Flat partition topology (prevents root /product shadowing /product -> /system/product symlink)
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = systemRoot,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+        alerts.add(
+            VerificationAlertEntity(
+                module = "Porting",
+                severity = "PASS",
+                title = "Topologie ${if (topology.isSarLayout) "SAR (/system/...)" else "Plate (/...)"} & Symlinks cohérents",
+                technicalDetail = if (topology.healedConflicts.isNotEmpty()) {
+                    "Migration SAR autonome exécutée : ${topology.healedConflicts.joinToString(" | ")} -> Overlays dans ${topology.systemPrefixRel}product/overlay."
+                } else {
+                    "${topology.layoutLabel} • Overlays dans ${topology.systemPrefixRel}product/overlay, Init dans ${topology.systemPrefixRel}etc/init."
+                },
+                remediationCommand = "OK",
+                resolved = true
+            )
+        )
+
         // 1. Check Key Maker vs all mac_permissions.xml files inside the unpacked system
         val macPermCandidates = listOf(
-            File(systemRoot, "etc/selinux/plat_mac_permissions.xml"),
-            File(systemRoot, "system/etc/selinux/plat_mac_permissions.xml"),
-            File(systemRoot, "system_ext/etc/selinux/system_ext_mac_permissions.xml"),
-            File(systemRoot, "product/etc/selinux/product_mac_permissions.xml")
+            File(topology.selinuxDir, "plat_mac_permissions.xml"),
+            File(topology.systemExtDir, "etc/selinux/system_ext_mac_permissions.xml"),
+            File(topology.productDir, "etc/selinux/product_mac_permissions.xml")
         ).filter { it.exists() }
 
-        val primaryMacPerm = macPermCandidates.firstOrNull() ?: File(systemRoot, "etc/selinux/plat_mac_permissions.xml")
+        val primaryMacPerm = macPermCandidates.firstOrNull() ?: File(topology.selinuxDir, "plat_mac_permissions.xml")
 
         if (activeKeys.isEmpty()) {
             alerts.add(
@@ -171,10 +192,9 @@ class CrossVerifierEngine(private val workspaceDir: File) {
             .filter { it.isFile && it.extension.equals("apk", true) && it.invariantSeparatorsPath.contains("priv-app/") }
             .toList()
         val privPermXmlFiles = listOf(
-            File(systemRoot, "etc/permissions/privapp-permissions-platform.xml"),
-            File(systemRoot, "system/etc/permissions/privapp-permissions-platform.xml"),
-            File(systemRoot, "product/etc/permissions/privapp-permissions-product.xml"),
-            File(systemRoot, "system_ext/etc/permissions/privapp-permissions-system-ext.xml")
+            File(topology.permissionsDir, "privapp-permissions-platform.xml"),
+            File(topology.productDir, "etc/permissions/privapp-permissions-product.xml"),
+            File(topology.systemExtDir, "etc/permissions/privapp-permissions-system-ext.xml")
         ).filter { it.exists() }
 
         val combinedPrivPermXml = privPermXmlFiles.joinToString("\n") { it.readText() }
@@ -187,7 +207,7 @@ class CrossVerifierEngine(private val workspaceDir: File) {
                     module = "Sign Pro",
                     severity = "CRITICAL",
                     title = "Whitelist XML privapp-permissions incomplète (${privApps.size} priv-apps)",
-                    technicalDetail = "Sur Android 8+, si un APK de priv-app (SystemUI, Settings, TeleService) n'est pas déclaré dans etc/permissions/privapp-permissions-*.xml, SystemServer déclenche une exception fatale au boot (ro.control_privapp_permissions=enforce).",
+                    technicalDetail = "Sur Android 8+, si un APK de priv-app (SystemUI, Settings, TeleService) n'est pas déclaré dans ${topology.systemPrefixRel}etc/permissions/privapp-permissions-*.xml, SystemServer déclenche une exception fatale au boot (ro.control_privapp_permissions=enforce).",
                     remediationCommand = "Générer et synchroniser privapp-permissions-*.xml via Sign Pro"
                 )
             )
@@ -197,7 +217,7 @@ class CrossVerifierEngine(private val workspaceDir: File) {
                     module = "Sign Pro",
                     severity = "PASS",
                     title = "Cohérence XML privapp-permissions (${privPermXmlFiles.size} fichiers XML)",
-                    technicalDetail = "Toutes les applications privilégiées (${privApps.size} priv-apps dont SystemUI & Settings) sont autorisées dans privapp-permissions-*.xml (Zéro risque de crash SystemServer).",
+                    technicalDetail = "Toutes les applications privilégiées (${privApps.size} priv-apps dont SystemUI & Settings) sont autorisées dans ${topology.systemPrefixRel}etc/permissions/privapp-permissions-*.xml (Zéro risque de crash SystemServer).",
                     remediationCommand = "OK",
                     resolved = true
                 )
@@ -205,8 +225,7 @@ class CrossVerifierEngine(private val workspaceDir: File) {
         }
 
         // 4. Check SELinux plat_file_contexts syntax inside UNPACK/<system>
-        val fcFile = File(systemRoot, "etc/selinux/plat_file_contexts").takeIf { it.exists() }
-            ?: File(systemRoot, "system/etc/selinux/plat_file_contexts")
+        val fcFile = File(topology.selinuxDir, "plat_file_contexts")
         if (fcFile.exists()) {
             var invalidLines = 0
             fcFile.readLines().forEach { raw ->

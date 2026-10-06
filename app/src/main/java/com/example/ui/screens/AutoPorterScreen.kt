@@ -329,8 +329,9 @@ fun AutoPorterScreen(
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                         Text(
-                                            text = "• Version : ${mechReport.gsiAndroidRelease} • ${mechReport.gsiVndkVersion}\n" +
-                                                    "• Treble  : ${mechReport.trebleArchitecture}",
+                                            text = "• Version   : ${mechReport.gsiAndroidRelease} • ${mechReport.gsiVndkVersion}\n" +
+                                                    "• Topologie : ${mechReport.topologyLabel}\n" +
+                                                    "• Treble    : ${mechReport.trebleArchitecture}",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontFamily = FontFamily.Monospace
                                         )
@@ -590,6 +591,16 @@ fun AutoPorterScreen(
                                         Text(
                                             text = fodStruct.rootCauseWhyFodWontWork,
                                             style = MaterialTheme.typography.bodySmall,
+                                            color = if (fodStruct.stockGradeFixApplied) {
+                                                MaterialTheme.colorScheme.onSecondaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.onErrorContainer
+                                            }
+                                        )
+                                        Text(
+                                            text = "Topologie autonome : ${fodStruct.topologyLabel}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
                                             color = if (fodStruct.stockGradeFixApplied) {
                                                 MaterialTheme.colorScheme.onSecondaryContainer
                                             } else {

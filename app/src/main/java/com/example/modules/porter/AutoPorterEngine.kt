@@ -1,6 +1,7 @@
 package com.example.modules.porter
 
 import android.os.Build
+import com.example.core.img.AospTopologyResolver
 import com.example.core.img.Ext4UserspaceBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,7 +40,8 @@ data class GsiMechanismAndVendorReport(
     val declaredFrameworkHals: List<String>,
     val vendorHalDiffs: List<HalInterfaceDiffItem>,
     val keyDifferencesWithStockRom: List<String>,
-    val initRcVendorHooks: List<String>
+    val initRcVendorHooks: List<String>,
+    val topologyLabel: String = "System-As-Root (SAR /system/product/overlay)"
 )
 
 data class FodLayerNode(
@@ -62,7 +64,8 @@ data class FodStructScanReport(
     val rootCauseWhyFodWontWork: String,
     val coherentActionPlan: List<String>,
     val stockGradeFixApplied: Boolean = false,
-    val stockGradeFixSummary: List<String> = emptyList()
+    val stockGradeFixSummary: List<String> = emptyList(),
+    val topologyLabel: String = "System-As-Root (SAR /system/product/overlay)"
 )
 
 data class UdfpsFodDiagnostics(
@@ -130,8 +133,13 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): VirtualDeviceTreePortResult = withContext(Dispatchers.IO) {
         val stockVendor = resolveStockVendorRefDir()
         val gsiSystem = resolveGsiSourceDir(targetUnpackedGsiDir)
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = gsiSystem,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
 
-        onLog("[AUTO-PORTER] Analyse de l'arbre GSI (${gsiSystem.name}) et du Vendor de référence...")
+        onLog("[AUTO-PORTER] Analyse de l'arbre GSI (${gsiSystem.name} | Topologie : ${topology.layoutLabel}) et du Vendor de référence...")
 
         val liveHostProps = probeLiveAndroidHostProperties()
         val vendorRefProps = parseBuildProp(File(stockVendor, "build.prop"))
@@ -174,8 +182,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
             portOutputDirectoryPath = portTargetDir.absolutePath,
             portedSystemImgPath = File(getPortRootDir(), "${gsiSystem.name}_ported_${codename}.img").absolutePath,
             proprietaryBlobs = blobs,
-            rroOverlayApkPath = File(portTargetDir, "product/overlay/TrebleHardwareOverlay.apk").absolutePath,
-            vintfManifestMergedPath = File(portTargetDir, "etc/vintf/manifest_tucana_fod.xml").absolutePath,
+            rroOverlayApkPath = File(portTargetDir, "${topology.systemPrefixRel}product/overlay/TrebleHardwareOverlay.apk").absolutePath,
+            vintfManifestMergedPath = File(portTargetDir, "${topology.systemPrefixRel}etc/vintf/manifest_tucana_fod.xml").absolutePath,
             sepolicyCilMergedRulesCount = 18,
             fodDiagnostics = fodDiag,
             lineageDeviceMkContent = mkPreview,
@@ -198,8 +206,13 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val gsiSystem = resolveGsiSourceDir(targetUnpackedGsiDir)
         val stockVendor = stockVendorDir ?: resolveStockVendorRefDir()
         ensureTucanaBlobsPresent(stockVendor)
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = gsiSystem,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
 
-        onLog("[GSI-MECHANISM] Inspection approfondie du mécanisme GSI et du pont IPC/HAL avec Vendor sur ${gsiSystem.name}...")
+        onLog("[GSI-MECHANISM] Inspection approfondie du mécanisme GSI (${topology.layoutLabel}) et du pont IPC/HAL avec Vendor sur ${gsiSystem.name}...")
 
         val gsiProps = parseBuildProp(findBuildPropInTree(gsiSystem))
         val release = gsiProps["ro.build.version.release"] ?: "15"
@@ -207,20 +220,21 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val vndk = gsiProps["ro.vndk.version"] ?: "35"
         val trebleEnabled = gsiProps["ro.treble.enabled"] ?: "true"
 
-        // Inspect APEX VNDK & Binder libraries inside unpacked GSI
-        val apexDirs = File(gsiSystem, "apex").listFiles()?.map { it.name }.orEmpty()
+        // Inspect APEX VNDK & Binder libraries inside unpacked GSI (supports both /apex and /system/apex)
+        val apexDirs = (File(topology.systemBaseDir, "apex").listFiles()?.map { it.name }.orEmpty() +
+                File(gsiSystem, "apex").listFiles()?.map { it.name }.orEmpty()).distinct()
         val hasVndkApex = apexDirs.any { it.contains("vndk", true) }
-        val initRcFiles = File(gsiSystem, "etc/init").walkTopDown().filter { it.isFile && it.extension == "rc" }.toList()
+        val initRcFiles = topology.initRcDir.walkTopDown().filter { it.isFile && it.extension == "rc" }.toList()
 
         val declaredFrameworkHals = mutableListOf<String>()
-        val fwManifestFile = File(gsiSystem, "etc/vintf/manifest.xml")
+        val fwManifestFile = File(topology.vintfDir, "manifest.xml")
         if (fwManifestFile.exists()) {
             val xml = fwManifestFile.readText()
             Regex("<name>([^<]+)</name>").findAll(xml).forEach { m ->
                 declaredFrameworkHals.add(m.groupValues[1].trim())
             }
         }
-        val tucanaManifestFile = File(gsiSystem, "etc/vintf/manifest_tucana_fod.xml")
+        val tucanaManifestFile = File(topology.vintfDir, "manifest_tucana_fod.xml")
         val hasTucanaVintfBridge = tucanaManifestFile.exists()
         if (hasTucanaVintfBridge) {
             Regex("<name>([^<]+)</name>").findAll(tucanaManifestFile.readText()).forEach { m ->
@@ -229,18 +243,19 @@ class AutoPorterEngine(private val workspaceDir: File) {
         }
 
         val communicationChannels = listOf(
+            "Topologie Détectée : ${topology.layoutLabel}",
             "IPC Binder /dev/binder : Appels AIDL Framework <-> SystemServer (${declaredFrameworkHals.size} services déclarés)",
             "IPC HwBinder /dev/hwbinder : Pont Treble HIDL System <-> Vendor (VNDK v$vndk ${if (hasVndkApex) "APEX actif" else "standard"})",
             "IPC VndBinder /dev/vndbinder : Communication interne entre blobs propriétaires Vendor ($ stock_vendor_ref)",
-            "VINTF Compatibility Matrix : Vérification croisée /system/etc/vintf/compatibility_matrix.device.xml <-> /vendor/etc/vintf/manifest.xml",
-            "Socket Init & Property Service : Déclencheurs `on property:sys.*` et `persist.vendor.sys.fp.*` via ${initRcFiles.size} scripts .rc"
+            "VINTF Compatibility Matrix : Vérification croisée /${topology.systemPrefixRel}etc/vintf/compatibility_matrix.device.xml <-> /vendor/etc/vintf/manifest.xml",
+            "Socket Init & Property Service : Déclencheurs `on property:sys.*` et `persist.vendor.sys.fp.*` via ${initRcFiles.size} scripts .rc dans /${topology.systemPrefixRel}etc/init/"
         )
 
-        val hasDisplayFeatureHal = File(gsiSystem, "lib64/vendor.xiaomi.hardware.displayfeature@1.0.so").exists()
-        val hasXiaomiFpExtHal = File(gsiSystem, "lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so").exists()
-        val hasGoodixHal = File(gsiSystem, "lib64/vendor.goodix.hardware.biometrics.fingerprint@2.1.so").exists()
-        val hasAudioExt = File(gsiSystem, "lib64/libaudioroute_ext.so").exists()
-        val hasCamxUtils = File(gsiSystem, "lib64/libcamxexternalformatutils.so").exists()
+        val hasDisplayFeatureHal = File(topology.lib64Dir, "vendor.xiaomi.hardware.displayfeature@1.0.so").exists()
+        val hasXiaomiFpExtHal = File(topology.lib64Dir, "vendor.xiaomi.hardware.fingerprintextension@1.0.so").exists()
+        val hasGoodixHal = File(topology.lib64Dir, "vendor.goodix.hardware.biometrics.fingerprint@2.1.so").exists()
+        val hasAudioExt = File(topology.lib64Dir, "libaudioroute_ext.so").exists()
+        val hasCamxUtils = File(topology.lib64Dir, "libcamxexternalformatutils.so").exists()
 
         val vendorHalDiffs = listOf(
             HalInterfaceDiffItem(
@@ -341,9 +356,15 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): FodStructScanReport = withContext(Dispatchers.IO) {
         val gsiSystem = resolveGsiSourceDir(targetUnpackedGsiDir)
         val stockVendor = stockVendorDir ?: resolveStockVendorRefDir()
-        onLog("[FOD-STRUCT] Scan architectural FODstruct en cours sur UNPACK/${gsiSystem.name}...")
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = gsiSystem,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+        val pfx = topology.systemPrefixRel
+        onLog("[FOD-STRUCT] Scan architectural FODstruct en cours sur UNPACK/${gsiSystem.name} (Topologie : ${topology.layoutLabel})...")
 
-        val sysUiApk = gsiSystem.walkTopDown().firstOrNull {
+        val sysUiApk = topology.systemBaseDir.walkTopDown().firstOrNull {
             it.isFile && (it.name == "SystemUI.apk" || it.name == "SystemUIGoogle.apk")
         }
         val sysUiClasses = mutableListOf<String>()
@@ -354,7 +375,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             sysUiClasses.add("com.android.systemui.keyguard.KeyguardViewMediator#onFingerDown")
         }
 
-        val buildPropFile = findBuildPropInTree(gsiSystem)
+        val buildPropFile = topology.mainBuildPropFile
         val buildPropText = if (buildPropFile.exists()) buildPropFile.readText() else ""
         val phhHooks = mutableListOf<String>()
         if (buildPropText.contains("persist.sys.phh.fod")) {
@@ -364,17 +385,17 @@ class AutoPorterEngine(private val workspaceDir: File) {
             phhHooks.add("ro.hardware.fp.fod=true")
         }
         if (phhHooks.isEmpty()) {
-            phhHooks.add("Hooks PHH-Treble non configurés dans build.prop (état GSI brut)")
+            phhHooks.add("Hooks PHH-Treble non configurés dans ${pfx}build.prop (état GSI brut)")
         }
 
-        val hasHwOverlay = File(gsiSystem, "product/overlay/TrebleHardwareOverlay.apk").exists()
-        val hasSysUiOverlay = File(gsiSystem, "product/overlay/SystemUIUdfpsTucanaOverlay.apk").exists()
-        val hasXiaomiHalSo = File(gsiSystem, "lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so").exists() &&
-                File(gsiSystem, "lib64/vendor.goodix.hardware.biometrics.fingerprint@2.1.so").exists()
-        val hasVintfFod = File(gsiSystem, "etc/vintf/manifest_tucana_fod.xml").exists()
-        val hasInitRcFod = File(gsiSystem, "etc/init/init.tucana.fod.rc").exists()
-        val hasKeylayoutFod = File(gsiSystem, "usr/keylayout/uinput-goodix.kl").exists()
-        val hasSepolicyFod = File(gsiSystem, "etc/selinux/plat_pub_versioned.cil").let {
+        val hasHwOverlay = File(topology.productOverlayDir, "TrebleHardwareOverlay.apk").exists()
+        val hasSysUiOverlay = File(topology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk").exists()
+        val hasXiaomiHalSo = File(topology.lib64Dir, "vendor.xiaomi.hardware.fingerprintextension@1.0.so").exists() &&
+                File(topology.lib64Dir, "vendor.goodix.hardware.biometrics.fingerprint@2.1.so").exists()
+        val hasVintfFod = File(topology.vintfDir, "manifest_tucana_fod.xml").exists()
+        val hasInitRcFod = File(topology.initRcDir, "init.tucana.fod.rc").exists()
+        val hasKeylayoutFod = File(topology.keylayoutDir, "uinput-goodix.kl").exists()
+        val hasSepolicyFod = File(topology.selinuxDir, "plat_pub_versioned.cil").let {
             it.exists() && it.readText().contains("sysfs_drm_disp_param")
         }
 
@@ -382,52 +403,52 @@ class AutoPorterEngine(private val workspaceDir: File) {
             FodLayerNode(
                 layerOrder = 1,
                 layerName = "Couche 1 • SystemUI UDFPS & BiometricPrompt (Java/DEX)",
-                componentPath = sysUiApk?.relativeTo(gsiSystem)?.path ?: "priv-app/SystemUI/SystemUI.apk",
+                componentPath = sysUiApk?.relativeTo(gsiSystem)?.invariantSeparatorsPath ?: "${pfx}priv-app/SystemUI/SystemUI.apk",
                 presentInGsi = sysUiApk != null && hasSysUiOverlay,
                 currentArchitectureDetail = "UdfpsController gère le cercle optique tactile, le DimLayer et appelle `UdfpsHbmProvider` lors du posé du doigt.",
-                whyItFailsOnVendor = if (hasSysUiOverlay) "Overlay SystemUI UDFPS actif (#00FFAA Cyan/Green + seuils d'enrôlement)."
-                else "Sans `SystemUIUdfpsTucanaOverlay.apk`, SystemUI ignore la couleur optique Goodix (#00FFAA) et le type HBM local (`config_udfpsHbmType=0`).",
-                actionPlanStep = "Injecter `product/overlay/SystemUIUdfpsTucanaOverlay.apk` avec `config_udfpsColor=#00FFAA`, `config_udfpsHbmSupported=true` et les 4 seuils d'enrôlement."
+                whyItFailsOnVendor = if (hasSysUiOverlay) "Overlay SystemUI UDFPS actif dans ${pfx}product/overlay/ (#00FFAA Cyan/Green + seuils d'enrôlement)."
+                else "Sans `${pfx}product/overlay/SystemUIUdfpsTucanaOverlay.apk`, SystemUI ignore la couleur optique Goodix (#00FFAA) et le type HBM local (`config_udfpsHbmType=0`).",
+                actionPlanStep = "Injecter `${pfx}product/overlay/SystemUIUdfpsTucanaOverlay.apk` (et `${pfx}system_ext/overlay/`) avec `config_udfpsColor=#00FFAA`, `config_udfpsHbmSupported=true`."
             ),
             FodLayerNode(
                 layerOrder = 2,
                 layerName = "Couche 2 • Framework RRO & Géométrie Capteur (`config_udfps_sensor_props`)",
-                componentPath = "product/overlay/TrebleHardwareOverlay.apk",
+                componentPath = "${pfx}product/overlay/TrebleHardwareOverlay.apk",
                 presentInGsi = hasHwOverlay,
-                currentArchitectureDetail = "Définit les coordonnées physiques `(X=445, Y=1910, Rayon=95px, Taille=190x190)` et la transition d'illumination `50ms`.",
-                whyItFailsOnVendor = if (hasHwOverlay) "Coordonnées capteur (445, 1910, R=95) alignées avec le panneau AMOLED."
-                else "Le GSI générique place la zone FOD à `(0,0)` ou la désactive : l'icône d'empreinte ne s'affiche pas au bon endroit sur la dalle AMOLED.",
-                actionPlanStep = "Compiler et injecter `TrebleHardwareOverlay.apk` (priorité 999) contenant `config_udfps_sensor_props = [445, 1910, 95]`."
+                currentArchitectureDetail = "Définit les coordonnées physiques `(X=445, Y=1910, Rayon=95px, Taille=190x190)` et la transition d'illumination `50ms` dans ${pfx}product/overlay/.",
+                whyItFailsOnVendor = if (hasHwOverlay) "Coordonnées capteur (445, 1910, R=95) alignées dans ${pfx}product/overlay/ (symlink /product -> /system/product respecté)."
+                else "Le GSI générique place la zone FOD à `(0,0)` ou l'écrit au mauvais endroit : l'icône d'empreinte ne s'affiche pas sur la dalle AMOLED.",
+                actionPlanStep = "Compiler et injecter `${pfx}product/overlay/TrebleHardwareOverlay.apk` (priorité 999) contenant `config_udfps_sensor_props = [445, 1910, 95]`."
             ),
             FodLayerNode(
                 layerOrder = 3,
                 layerName = "Couche 3 • Pont HAL Propriétaire (`IXiaomiFingerprint` & `IGoodixFingerprintDaemon`)",
-                componentPath = "lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so",
+                componentPath = "${pfx}lib64/vendor.xiaomi.hardware.fingerprintextension@1.0.so",
                 presentInGsi = hasXiaomiHalSo && hasVintfFod,
                 currentArchitectureDetail = "Relie l'événement `onFingerDown(x, y, minor, major)` du framework vers le HAL Goodix GF9518 du Vendor.",
-                whyItFailsOnVendor = if (hasXiaomiHalSo && hasVintfFod) "Blobs HIDL Xiaomi/Goodix + matrice VINTF 2.3 présents."
+                whyItFailsOnVendor = if (hasXiaomiHalSo && hasVintfFod) "Blobs HIDL Xiaomi/Goodix dans ${pfx}lib64/ + matrice VINTF 2.3 présents."
                 else "Lorsque vous posez le doigt, le HAL Goodix du vendor attend un appel HIDL `extCmd(COMMAND_NIT, PARAM_NIT_FOD)` via `IXiaomiFingerprint` qui est absent du GSI.",
-                actionPlanStep = "Transplanter `vendor.xiaomi.hardware.fingerprintextension@1.0.so`, `vendor.goodix.hardware.biometrics.fingerprint@2.1.so`, `libgf_hal.so` et déclarer `manifest_tucana_fod.xml`."
+                actionPlanStep = "Transplanter les blobs dans `${pfx}lib64/` et déclarer `${pfx}etc/vintf/manifest_tucana_fod.xml`."
             ),
             FodLayerNode(
                 layerOrder = 4,
                 layerName = "Couche 4 • Pilote DRM Sysfs HBM (`disp_param` & `fod_ui_ready`)",
-                componentPath = "etc/init/init.tucana.fod.rc",
+                componentPath = "${pfx}etc/init/init.tucana.fod.rc",
                 presentInGsi = hasInitRcFod && hasKeylayoutFod,
-                currentArchitectureDetail = "Synchronise l'état `sys.udfps.hbm.state` avec le noeud noyau `/sys/class/drm/card0-DSI-1/disp_param` (`0x20000`) et le keycode `338` (`uinput-goodix.kl`).",
-                whyItFailsOnVendor = if (hasInitRcFod && hasKeylayoutFod) "Triggers Init RC HBM `0x20000` et keylayout `uinput-goodix.kl` actifs."
+                currentArchitectureDetail = "Synchronise l'état `sys.udfps.hbm.state` avec le noeud noyau `/sys/class/drm/card0-DSI-1/disp_param` (`0x20000`) et le keycode `338` (`${pfx}usr/keylayout/uinput-goodix.kl`).",
+                whyItFailsOnVendor = if (hasInitRcFod && hasKeylayoutFod) "Triggers Init RC HBM `0x20000` et keylayout `uinput-goodix.kl` actifs dans ${pfx}etc/init/."
                 else "Le panneau AMOLED n'allume pas la haute luminosité locale (HBM) sous le doigt et le noyau bloque l'accès à `disp_param` (UID root uniquement).",
-                actionPlanStep = "Générer `etc/init/init.tucana.fod.rc` (chown system `disp_param` + triggers `0x20000`/`0x0`) et `usr/keylayout/uinput-goodix.kl` (key 338)."
+                actionPlanStep = "Générer `${pfx}etc/init/init.tucana.fod.rc` (chown system `disp_param` + triggers `0x20000`/`0x0`) et `${pfx}usr/keylayout/uinput-goodix.kl` (key 338)."
             ),
             FodLayerNode(
                 layerOrder = 5,
                 layerName = "Couche 5 • Politique SELinux CIL & Propriétés Système (`plat_pub_versioned.cil`)",
-                componentPath = "etc/selinux/plat_pub_versioned.cil",
+                componentPath = "${pfx}etc/selinux/plat_pub_versioned.cil",
                 presentInGsi = hasSepolicyFod && buildPropText.contains("ro.hardware.fp.fod=true"),
                 currentArchitectureDetail = "Autorise `system_server`, `platform_app` et `hal_fingerprint_default` à écrire sur `sysfs_drm_disp_param` et appeler `vendor_xiaomi_fingerprint_hwservice`.",
-                whyItFailsOnVendor = if (hasSepolicyFod) "Règles SELinux CIL anti-AVC et propriétés FOD actives."
+                whyItFailsOnVendor = if (hasSepolicyFod) "Règles SELinux CIL anti-AVC et propriétés FOD actives dans ${pfx}etc/selinux/ et ${pfx}build.prop."
                 else "SELinux en mode Enforcing bloque silencieusement (`avc: denied`) l'ouverture de `/dev/goodix_fp` et `/sys/class/drm/card0-DSI-1/disp_param`.",
-                actionPlanStep = "Injecter les 15 règles SELinux CIL dans `etc/selinux/plat_pub_versioned.cil` et les propriétés `ro.hardware.fp.fod=true` + `persist.vendor.sys.fp.fod.*` dans `build.prop`."
+                actionPlanStep = "Injecter les 15 règles SELinux CIL dans `${pfx}etc/selinux/plat_pub_versioned.cil` et les propriétés FOD dans `${pfx}build.prop` + `config/system_file_contexts`."
             )
         )
 
@@ -435,9 +456,9 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val allFixed = missingItems.isEmpty()
 
         val rootCause = if (allFixed) {
-            "Architecture FODstruct 100% complète et alignée avec le Vendor (5/5 couches actives : SystemUI Overlay, Géométrie 445x1910, Blobs HIDL IXiaomiFingerprint/Goodix, Shim HBM 0x20000 et SELinux CIL)."
+            "Architecture FODstruct (${topology.layoutLabel}) 100% complète et alignée avec le Vendor (5/5 couches actives dans /${pfx}... : SystemUI Overlay, Géométrie 445x1910, Blobs HIDL IXiaomiFingerprint/Goodix, Shim HBM 0x20000 et SELinux CIL)."
         } else {
-            "Pourquoi le FOD ne fonctionne pas à l'état brut sur le Vendor : Le GSI utilise le contrôleur AOSP `UdfpsController` générique mais il lui manque ${missingItems.size} brique(s) matérielles indispensables pour communiquer avec le démon Goodix GF9518 et activer le HBM optique (`0x20000`) sur `/sys/class/drm/card0-DSI-1/disp_param`."
+            "Pourquoi le FOD ne fonctionne pas à l'état brut sur le Vendor : Le GSI (${topology.layoutLabel}) utilise le contrôleur AOSP `UdfpsController` générique mais il lui manque ${missingItems.size} brique(s) matérielles indispensables dans /${pfx}... pour communiquer avec le démon Goodix GF9518 et activer le HBM optique (`0x20000`) sur `/sys/class/drm/card0-DSI-1/disp_param`."
         }
 
         val actionPlan = layers.map { "Étape ${it.layerOrder} — ${it.actionPlanStep}" }
@@ -448,7 +469,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
 
         FodStructScanReport(
             scannedGsiName = gsiSystem.name,
-            fodArchitectureType = "AOSP BiometricPrompt + UDFPS Optical HBM Bridge (Goodix GF9518 / Xiaomi DisplayFeature)",
+            fodArchitectureType = "${topology.layoutLabel} • AOSP UDFPS Optical HBM Bridge",
             systemUiUdfpsClassesFound = sysUiClasses,
             phhTrebleHooksFound = phhHooks,
             layerNodes = layers,
@@ -461,8 +482,9 @@ class AutoPorterEngine(private val workspaceDir: File) {
 
     /**
      * One-Click Stock-Grade Coherent FOD Fixer (`applyCoherentStockGradeFodFix`):
-     * Implements every missing FOD layer directly in the unpacked GSI AND in the `ROM_FORGE/PORT/` image
-     * so that the optical under-display fingerprint sensor works seamlessly like a Stock ROM.
+     * Autonomously detects SAR (`system/product/overlay/...`) vs Flat (`product/overlay/...`),
+     * heals any misplaced root `/product` directories that conflict with `/product -> /system/product` symlinks,
+     * and implements every missing FOD layer directly in the canonical paths of the unpacked GSI AND `ROM_FORGE/PORT/`.
      */
     suspend fun applyCoherentStockGradeFodFix(
         targetUnpackedGsiDir: File? = null,
@@ -472,7 +494,15 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val gsiSystem = resolveGsiSourceDir(targetUnpackedGsiDir)
         ensureTucanaBlobsPresent(stockVendor)
 
-        onLog("[FOD-FIXER] Application du Fix FOD Cohérent (Qualité Stock ROM) sur UNPACK/${gsiSystem.name}...")
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = gsiSystem,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+        val pfx = topology.systemPrefixRel
+
+        onLog("[FOD-FIXER] Topologie détectée : ${topology.layoutLabel}")
+        onLog("[FOD-FIXER] Application autonome du Fix FOD Cohérent dans /${pfx}... sur UNPACK/${gsiSystem.name}...")
 
         val liveHostProps = probeLiveAndroidHostProperties()
         val vendorRefProps = parseBuildProp(File(stockVendor, "build.prop"))
@@ -482,34 +512,61 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val platform = mergedVendorProps["ro.board.platform"] ?: "sm6150"
 
         val initialFodDiag = inspectUdfpsFodHardware(stockVendor, gsiSystem, mergedVendorProps)
+        val injectedFiles = mutableListOf<File>()
 
-        // 1. Copy all FOD/DisplayFeature/Goodix blobs directly into the unpacked GSI so both UNPACK and PORT have 100% coherence
+        // 1. Copy all FOD/DisplayFeature/Goodix blobs directly into the canonical systemBaseDir (e.g. system/lib64/ on SAR)
         val rawBlobs = scanProprietaryBlobs(stockVendor, gsiSystem)
         rawBlobs.forEach { blob ->
             val src = File(stockVendor, blob.relativePath)
-            val dst = File(gsiSystem, blob.relativePath)
+            val dst = File(topology.systemBaseDir, blob.relativePath)
             dst.parentFile?.mkdirs()
             if (src.exists()) {
                 src.copyTo(dst, overwrite = true)
+                injectedFiles.add(dst)
             }
         }
-        onLog("[FOD-FIX 1/5] Blobs HIDL IXiaomiFingerprint 1.0, IGoodixFingerprintDaemon 2.1, libgf_hal.so et IDisplayFeature 1.0 injectés.")
+        onLog("[FOD-FIX 1/5] Blobs HIDL IXiaomiFingerprint 1.0, IGoodixFingerprintDaemon 2.1, libgf_hal.so et IDisplayFeature 1.0 injectés dans ${pfx}lib64/.")
 
-        // 2. Generate both RRO Overlays (Framework Geometry 445,1910 + SystemUI Optical #00FFAA HBM)
-        val hwOverlay = File(gsiSystem, "product/overlay/TrebleHardwareOverlay.apk")
-        val sysUiOverlay = File(gsiSystem, "product/overlay/SystemUIUdfpsTucanaOverlay.apk")
+        // 2. Generate both RRO Overlays inside the canonical product/overlay/ AND system_ext/overlay/ inside systemBaseDir
+        val hwOverlay = File(topology.productOverlayDir, "TrebleHardwareOverlay.apk")
+        val sysUiOverlay = File(topology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
         generateHardwareRroOverlayApk(hwOverlay, brand, codename, initialFodDiag)
         generateSystemUiUdfpsOverlayApk(sysUiOverlay, codename, initialFodDiag)
-        onLog("[FOD-FIX 2/5] Overlays RRO compilés (STORED 4K) : TrebleHardwareOverlay.apk (445, 1910, R=95) & SystemUIUdfpsTucanaOverlay.apk (#00FFAA).")
+        injectedFiles.add(hwOverlay)
+        injectedFiles.add(sysUiOverlay)
 
-        // 3. Inject VINTF Biometrics & DisplayFeature Matrix + SELinux CIL rules
-        transplantVintfAndMediaConfigs(stockVendor, gsiSystem, initialFodDiag, onLog)
+        // Also mirror into system_ext/overlay if system_ext exists so both Product and SystemExt RRO scanners load them
+        val sysExtOverlayDir = File(topology.systemExtDir, "overlay")
+        if (topology.systemExtDir.exists()) {
+            val hwOverlayExt = File(sysExtOverlayDir, "TrebleHardwareOverlay.apk")
+            val sysUiOverlayExt = File(sysExtOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
+            hwOverlay.copyTo(hwOverlayExt, overwrite = true)
+            sysUiOverlay.copyTo(sysUiOverlayExt, overwrite = true)
+            injectedFiles.add(hwOverlayExt)
+            injectedFiles.add(sysUiOverlayExt)
+        }
+        onLog("[FOD-FIX 2/5] Overlays RRO compilés dans ${pfx}product/overlay/ : TrebleHardwareOverlay.apk (445, 1910, R=95) & SystemUIUdfpsTucanaOverlay.apk (#00FFAA).")
+
+        // 3. Inject VINTF Biometrics & DisplayFeature Matrix + SELinux CIL rules into canonical systemBaseDir/etc/
+        val vintfFile = transplantVintfAndMediaConfigs(stockVendor, gsiSystem, initialFodDiag, onLog)
+        val cilFile = File(topology.selinuxDir, "plat_pub_versioned.cil")
         mergeVendorSepolicyCilRules(gsiSystem, codename, onLog)
-        onLog("[FOD-FIX 3/5] Matrice VINTF (manifest_tucana_fod.xml) et 15 règles SELinux CIL anti-AVC synchronisées.")
+        injectedFiles.add(vintfFile)
+        injectedFiles.add(cilFile)
+        onLog("[FOD-FIX 3/5] Matrice VINTF (${pfx}etc/vintf/manifest_tucana_fod.xml) et 15 règles SELinux CIL synchronisées.")
 
-        // 4. Inject Init RC HBM 0x20000 state machine, Goodix keylayout 338, and build.prop FOD properties
+        // 4. Inject Init RC HBM 0x20000 state machine, Goodix keylayout 338, and build.prop FOD properties into canonical systemBaseDir
         injectUdfpsFodHalAndHbmShim(gsiSystem, brand, codename, platform, initialFodDiag, onLog)
-        onLog("[FOD-FIX 4/5] Machine à états HBM (`init.tucana.fod.rc`), `uinput-goodix.kl` (key 338) et propriétés `build.prop` activés.")
+        injectedFiles.add(File(topology.initRcDir, "init.tucana.fod.rc"))
+        injectedFiles.add(File(topology.keylayoutDir, "uinput-goodix.kl"))
+        onLog("[FOD-FIX 4/5] Machine à états HBM (${pfx}etc/init/init.tucana.fod.rc), ${pfx}usr/keylayout/uinput-goodix.kl et propriétés ${pfx}build.prop activés.")
+
+        // Register all injected files in UKA config/system_fs_config, config/system_file_contexts & plat_file_contexts
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(
+            unpackedRoot = gsiSystem,
+            injectedFiles = injectedFiles,
+            onLog = onLog
+        )
 
         // 5. Execute the full PORT pipeline so `ROM_FORGE/PORT/` also receives the updated system + compiled .img
         val portResult = executeFullGsiPortingPipeline(
@@ -522,15 +579,17 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val updatedFodStruct = scanFodStructAndBuildActionPlan(gsiSystem, stockVendor) { }.copy(
             stockGradeFixApplied = true,
             stockGradeFixSummary = listOf(
-                "Couche 1 (SystemUI) : Overlay `SystemUIUdfpsTucanaOverlay.apk` injecté (`#00FFAA`, HBM type 0, 4 paliers d'enrôlement).",
-                "Couche 2 (Framework) : Overlay `TrebleHardwareOverlay.apk` injecté (`config_udfps_sensor_props = [445, 1910, 95]`, transition 50ms).",
-                "Couche 3 (HAL & Blobs) : `IXiaomiFingerprint@1.0`, `IGoodixFingerprintDaemon@2.1`, `IDisplayFeature@1.0` et `libgf_hal.so` pontés dans `lib64/` et `manifest_tucana_fod.xml`.",
-                "Couche 4 (Noyau & DRM HBM) : Script `init.tucana.fod.rc` écrivant `0x20000` sur `/sys/class/drm/card0-DSI-1/disp_param` + `fod_ui_ready` + `uinput-goodix.kl` (keycode 338).",
-                "Couche 5 (SELinux & Props) : 15 règles CIL dans `plat_pub_versioned.cil` + `ro.hardware.fp.fod=true` et `persist.vendor.sys.fp.fod.location.X_Y=445,1910`."
+                "Topologie Résolue : ${topology.layoutLabel}" +
+                        if (topology.healedConflicts.isNotEmpty()) " (${topology.healedConflicts.first()})" else "",
+                "Couche 1 (SystemUI) : Overlay `${pfx}product/overlay/SystemUIUdfpsTucanaOverlay.apk` injecté (`#00FFAA`, HBM type 0).",
+                "Couche 2 (Framework) : Overlay `${pfx}product/overlay/TrebleHardwareOverlay.apk` injecté (`[445, 1910, 95]`, transition 50ms).",
+                "Couche 3 (HAL & Blobs) : `IXiaomiFingerprint@1.0`, `IGoodixFingerprintDaemon@2.1`, `IDisplayFeature@1.0` et `libgf_hal.so` dans `${pfx}lib64/` et `${pfx}etc/vintf/manifest_tucana_fod.xml`.",
+                "Couche 4 (Noyau & DRM HBM) : Script `${pfx}etc/init/init.tucana.fod.rc` (`0x20000` sur `disp_param`) + `${pfx}usr/keylayout/uinput-goodix.kl` (keycode 338).",
+                "Couche 5 (SELinux & UKA Config) : 15 règles CIL dans `${pfx}etc/selinux/plat_pub_versioned.cil` + synchronisation `config/system_fs_config` & `system_file_contexts`."
             )
         )
 
-        onLog("[FOD-FIXER] Fix FOD Stock-Grade appliqué avec succès (5/5 couches actives dans UNPACK et PORT).")
+        onLog("[FOD-FIXER] Fix FOD Stock-Grade appliqué avec autonomie totale dans /${pfx}... (5/5 couches actives dans UNPACK et PORT).")
 
         portResult.copy(
             gsiMechanismReport = updatedMech,
@@ -551,6 +610,13 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val stockVendor = resolveStockVendorRefDir()
         val gsiSource = resolveGsiSourceDir(targetUnpackedGsiDir)
 
+        // Heal SAR topology on source first so no stray root /product directory is copied
+        AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = gsiSource,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+
         val liveHostProps = probeLiveAndroidHostProperties()
         val vendorRefProps = parseBuildProp(File(stockVendor, "build.prop"))
         val mergedVendorProps = vendorRefProps + liveHostProps
@@ -570,37 +636,60 @@ class AutoPorterEngine(private val workspaceDir: File) {
             gsiSource.copyRecursively(portedSystemDir, overwrite = true)
         }
 
-        onLog("[PORT-STEP 1/5] Extraction & transplantation des Blobs propriétaires (LineageOS $codename / $platform)...")
+        val portTopology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = portedSystemDir,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+        val pfx = portTopology.systemPrefixRel
+        val injectedPortFiles = mutableListOf<File>()
+
+        onLog("[PORT-STEP 1/5] Extraction & transplantation des Blobs propriétaires vers /${pfx}lib64/ ($codename / $platform)...")
         val rawBlobs = scanProprietaryBlobs(stockVendor, portedSystemDir)
         val transplantedBlobs = rawBlobs.map { blob ->
             val src = File(stockVendor, blob.relativePath)
-            val dst = File(portedSystemDir, blob.relativePath)
+            val dst = File(portTopology.systemBaseDir, blob.relativePath)
             dst.parentFile?.mkdirs()
             if (src.exists()) {
                 src.copyTo(dst, overwrite = true)
+                injectedPortFiles.add(dst)
             }
-            onLog("[BLOB-COPY] Transplanté vers PORT : ${blob.relativePath} [${blob.subsystem}]")
+            onLog("[BLOB-COPY] Transplanté vers PORT : ${pfx}${blob.relativePath} [${blob.subsystem}]")
             blob.copy(missingInGsi = false, transplanted = true)
         }
 
-        onLog("[PORT-STEP 2/5] Génération des Overlays RRO UDFPS/FOD & Display Cutout (Tucana SM6150)...")
+        onLog("[PORT-STEP 2/5] Génération des Overlays RRO UDFPS/FOD dans /${pfx}product/overlay/ (Tucana SM6150)...")
         val fodDiag = inspectUdfpsFodHardware(stockVendor, portedSystemDir, mergedVendorProps)
-        val overlayApk = File(portedSystemDir, "product/overlay/TrebleHardwareOverlay.apk")
-        val udfpsOverlayApk = File(portedSystemDir, "product/overlay/SystemUIUdfpsTucanaOverlay.apk")
+        val overlayApk = File(portTopology.productOverlayDir, "TrebleHardwareOverlay.apk")
+        val udfpsOverlayApk = File(portTopology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
         generateHardwareRroOverlayApk(overlayApk, brand, codename, fodDiag)
         generateSystemUiUdfpsOverlayApk(udfpsOverlayApk, codename, fodDiag)
-        onLog("[RRO-BUILDER] Overlays injectés dans PORT : TrebleHardwareOverlay.apk & SystemUIUdfpsTucanaOverlay.apk")
+        injectedPortFiles.add(overlayApk)
+        injectedPortFiles.add(udfpsOverlayApk)
+        onLog("[RRO-BUILDER] Overlays injectés dans PORT/${pfx}product/overlay/ : TrebleHardwareOverlay.apk & SystemUIUdfpsTucanaOverlay.apk")
 
-        onLog("[PORT-STEP 3/5] Fusion VINTF HIDL/AIDL (IXiaomiFingerprint + IGoodixFingerprintDaemon + IDisplayFeature)...")
+        onLog("[PORT-STEP 3/5] Fusion VINTF HIDL/AIDL dans /${pfx}etc/vintf/ (IXiaomiFingerprint + IGoodixFingerprintDaemon + IDisplayFeature)...")
         val vintfFile = transplantVintfAndMediaConfigs(stockVendor, portedSystemDir, fodDiag, onLog)
         val cilCount = mergeVendorSepolicyCilRules(portedSystemDir, codename, onLog)
+        injectedPortFiles.add(vintfFile)
+        injectedPortFiles.add(File(portTopology.selinuxDir, "plat_pub_versioned.cil"))
 
-        onLog("[PORT-STEP 4/5] Injection du HAL Biométrique UDFPS, DimLayer & Shim HBM (${fodDiag.hbmSysfsNode})...")
+        onLog("[PORT-STEP 4/5] Injection du HAL Biométrique UDFPS, DimLayer & Shim HBM dans /${pfx}etc/init/ (${fodDiag.hbmSysfsNode})...")
         val updatedFod = injectUdfpsFodHalAndHbmShim(portedSystemDir, brand, codename, platform, fodDiag, onLog)
+        injectedPortFiles.add(File(portTopology.initRcDir, "init.tucana.fod.rc"))
+        injectedPortFiles.add(File(portTopology.keylayoutDir, "uinput-goodix.kl"))
 
         val mkContent = generateLineageDeviceTreeMakefile(brand, codename, model, platform, transplantedBlobs, updatedFod)
-        File(portedSystemDir, "etc/device_${codename}_port.mk").writeText(mkContent)
+        val mkInSystem = File(portTopology.etcDir, "device_${codename}_port.mk")
+        mkInSystem.writeText(mkContent)
+        injectedPortFiles.add(mkInSystem)
         File(portRoot, "lineage_${codename}.mk").writeText(mkContent)
+
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(
+            unpackedRoot = portedSystemDir,
+            injectedFiles = injectedPortFiles,
+            onLog = onLog
+        )
 
         val portedImgFile = File(portRoot, "${gsiSource.name}_ported_${codename}.img")
         if (compilePortedImg) {

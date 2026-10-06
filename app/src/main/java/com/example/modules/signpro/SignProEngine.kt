@@ -1,6 +1,7 @@
 package com.example.modules.signpro
 
 import android.util.Base64
+import com.example.core.img.AospTopologyResolver
 import com.example.data.local.KeyManifestEntity
 import com.example.modules.keymaker.KeyMakerEngine
 import kotlinx.coroutines.Dispatchers
@@ -896,21 +897,25 @@ class SignProEngine(
             appendLine("</policy>")
         }
 
-        // 1. Write to all standard AOSP / SAR / system_ext / product SELinux policy paths
-        val candidatePaths = mutableListOf(
-            File(targetRootDir, "etc/selinux/plat_mac_permissions.xml"),
-            File(targetRootDir, "system_ext/etc/selinux/system_ext_mac_permissions.xml"),
-            File(targetRootDir, "product/etc/selinux/product_mac_permissions.xml")
+        // 1. Resolve canonical SAR vs Flat topology so we NEVER create root-level /etc, /product, or /system_ext directories on a SAR image!
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = targetRootDir,
+            autoHealSarConflicts = true,
+            onLog = onLog
         )
-        if (File(targetRootDir, "system").isDirectory) {
-            candidatePaths.add(File(targetRootDir, "system/etc/selinux/plat_mac_permissions.xml"))
-        }
+
+        val candidatePaths = listOf(
+            File(topology.selinuxDir, "plat_mac_permissions.xml"),
+            File(topology.systemExtDir, "etc/selinux/system_ext_mac_permissions.xml"),
+            File(topology.productDir, "etc/selinux/product_mac_permissions.xml")
+        )
 
         candidatePaths.forEach { file ->
             file.parentFile?.mkdirs()
             file.writeText(xml)
         }
-        onLog("[XML-SELINUX] plat_mac_permissions.xml, system_ext et product synchronisés avec les ${keys.size} clés RSA-2048.")
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(targetRootDir, candidatePaths, onLog)
+        onLog("[XML-SELINUX] (${topology.systemPrefixRel}etc/selinux/*) plat_mac_permissions.xml, system_ext et product synchronisés avec les ${keys.size} clés RSA-2048.")
 
         // 2. Synchronize privapp-permissions-*.xml across system, system_ext, and product (Zero-Bootloop Guarantee)
         synchronizePrivAppPermissionsXmls(targetRootDir, onLog)
@@ -927,6 +932,7 @@ class SignProEngine(
      * so Android's `PermissionManagerService` never aborts boot with `IllegalStateException`.
      */
     private fun synchronizePrivAppPermissionsXmls(targetRootDir: File, onLog: (String) -> Unit) {
+        val topology = AospTopologyResolver.inspectAndResolve(targetRootDir, autoHealSarConflicts = false)
         val corePrivPackages = linkedMapOf(
             "com.android.systemui" to listOf(
                 "android.permission.STATUS_BAR",
@@ -1076,24 +1082,23 @@ class SignProEngine(
             appendLine("</permissions>")
         }
 
-        val privXmlPaths = mutableListOf(
-            File(targetRootDir, "etc/permissions/privapp-permissions-platform.xml"),
-            File(targetRootDir, "product/etc/permissions/privapp-permissions-product.xml"),
-            File(targetRootDir, "system_ext/etc/permissions/privapp-permissions-system-ext.xml")
+        val privXmlPaths = listOf(
+            File(topology.permissionsDir, "privapp-permissions-platform.xml"),
+            File(topology.productDir, "etc/permissions/privapp-permissions-product.xml"),
+            File(topology.systemExtDir, "etc/permissions/privapp-permissions-system-ext.xml")
         )
-        if (File(targetRootDir, "system").isDirectory) {
-            privXmlPaths.add(File(targetRootDir, "system/etc/permissions/privapp-permissions-platform.xml"))
-        }
 
         privXmlPaths.forEach { f ->
             f.parentFile?.mkdirs()
             f.writeText(privXmlContent)
         }
-        onLog("[XML-PRIVAPP] Whitelist privapp-permissions-*.xml synchronisée pour ${corePrivPackages.size} packages privilégiés (Zéro crash SystemServer).")
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(targetRootDir, privXmlPaths, null)
+        onLog("[XML-PRIVAPP] Whitelist ${topology.systemPrefixRel}etc/permissions/privapp-permissions-*.xml synchronisée pour ${corePrivPackages.size} packages privilégiés (Zéro crash SystemServer).")
     }
 
     private fun synchronizeHiddenApiWhitelistXml(targetRootDir: File, onLog: (String) -> Unit) {
-        val sysconfigFile = File(targetRootDir, "etc/sysconfig/hiddenapi-package-whitelist.xml")
+        val topology = AospTopologyResolver.inspectAndResolve(targetRootDir, autoHealSarConflicts = false)
+        val sysconfigFile = File(topology.etcDir, "sysconfig/hiddenapi-package-whitelist.xml")
         sysconfigFile.parentFile?.mkdirs()
         sysconfigFile.writeText(
             """
@@ -1113,7 +1118,8 @@ class SignProEngine(
             </config>
             """.trimIndent() + "\n"
         )
-        onLog("[XML-SYSCONFIG] etc/sysconfig/hiddenapi-package-whitelist.xml synchronisé.")
+        AospTopologyResolver.registerInjectedFilesInAllConfigs(targetRootDir, listOf(sysconfigFile), null)
+        onLog("[XML-SYSCONFIG] ${topology.systemPrefixRel}etc/sysconfig/hiddenapi-package-whitelist.xml synchronisé.")
     }
 
     private fun extractPackageNameFromApk(apkFile: File): String? {
@@ -1135,11 +1141,11 @@ class SignProEngine(
     }
 
     private fun updateBuildPropTags(targetRootDir: File, onLog: (String) -> Unit) {
+        val topology = AospTopologyResolver.inspectAndResolve(targetRootDir, autoHealSarConflicts = false)
         val propCandidates = listOf(
-            File(targetRootDir, "build.prop"),
-            File(targetRootDir, "system/build.prop"),
-            File(targetRootDir, "product/etc/build.prop"),
-            File(targetRootDir, "system_ext/etc/build.prop")
+            topology.mainBuildPropFile,
+            File(topology.productDir, "etc/build.prop"),
+            File(topology.systemExtDir, "etc/build.prop")
         )
         for (propFile in propCandidates) {
             if (propFile.exists()) {
@@ -1155,13 +1161,13 @@ class SignProEngine(
                 propFile.writeText(updated)
             }
         }
-        onLog("[SIGN-PRO] Propriétés build.prop synchronisées : ro.build.tags=release-keys & ro.control_privapp_permissions=log")
+        onLog("[SIGN-PRO] Propriétés ${topology.systemPrefixRel}build.prop synchronisées : ro.build.tags=release-keys & ro.control_privapp_permissions=log")
     }
 
     fun readCurrentMacPermissionsXml(targetDecompiledDir: File? = null): String {
         val rootDir = resolveDecompiledDir(targetDecompiledDir)
-        val sarMac = File(rootDir, "system/etc/selinux/plat_mac_permissions.xml")
-        val macFile = if (sarMac.exists()) sarMac else File(rootDir, "etc/selinux/plat_mac_permissions.xml")
-        return if (macFile.exists()) macFile.readText() else "<!-- Fichier plat_mac_permissions.xml introuvable dans ${rootDir.name} -->"
+        val topology = AospTopologyResolver.inspectAndResolve(rootDir, autoHealSarConflicts = false)
+        val macFile = File(topology.selinuxDir, "plat_mac_permissions.xml")
+        return if (macFile.exists()) macFile.readText() else "<!-- Fichier ${topology.systemPrefixRel}etc/selinux/plat_mac_permissions.xml introuvable dans ${rootDir.name} -->"
     }
 }
