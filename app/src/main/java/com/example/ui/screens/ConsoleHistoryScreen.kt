@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Folder
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -47,6 +49,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -85,7 +88,8 @@ fun ConsoleHistoryScreen(
     onSelectDecompiledImgAndNavigate: (String, KitchenTab) -> Unit
 ) {
     val context = LocalContext.current
-    var selectedSubTab by remember { mutableIntStateOf(0) } // 0 = Terminal & Logs Live, 1 = Dossiers UNPACK / PORT & Historique
+    // 0 = Log Entier & Terminal Interactif, 1 = Historique & Progression des Actions
+    var selectedSubTab by remember { mutableIntStateOf(0) }
     var selectedLevelFilter by remember { mutableStateOf("ALL") }
     var searchQuery by remember { mutableStateOf("") }
     var showSearchBar by remember { mutableStateOf(false) }
@@ -117,7 +121,70 @@ fun ConsoleHistoryScreen(
             .fillMaxSize()
             .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
-        // Compact Top Toolbar: Sub-Tab Selector + Search Toggle + Copy + Save TXT + Clear
+        // Live Action Progress Card (always visible at top of Console)
+        Surface(
+            color = if (uiState.isBusy) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
+            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 6.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Timeline,
+                            contentDescription = null,
+                            tint = if (uiState.isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (uiState.isBusy) "PROGRESSION EN COURS : ${uiState.activeTaskTitle}"
+                            else "PROGRESSION DES ACTIONS : Prêt (${uiState.actionHistory.size} actions enregistrées)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Text(
+                        text = if (uiState.isBusy) "${(uiState.activeTaskProgress * 100).toInt().coerceIn(10, 95)}%" else "100%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (uiState.isBusy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                    )
+                }
+
+                if (uiState.isBusy) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        progress = { 1f },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
+        }
+
+        // Top Toolbar: Sub-Tab Selector + Search Toggle + Copy + Save TXT + Clear
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -133,7 +200,7 @@ fun ConsoleHistoryScreen(
                     onClick = { selectedSubTab = 0 },
                     label = {
                         Text(
-                            text = "Terminal (${uiState.terminalLogs.size})",
+                            text = "Log Entier & Commandes (${uiState.terminalLogs.size})",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
@@ -154,7 +221,7 @@ fun ConsoleHistoryScreen(
                     onClick = { selectedSubTab = 1 },
                     label = {
                         Text(
-                            text = "Espaces (${uiState.availableDecompiledImgs.size})",
+                            text = "Historique (${uiState.actionHistory.size})",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1
@@ -239,7 +306,6 @@ fun ConsoleHistoryScreen(
         }
 
         if (selectedSubTab == 0) {
-            // Optional collapsible search bar so it doesn't steal height when not needed
             AnimatedVisibility(visible = showSearchBar) {
                 OutlinedTextField(
                     value = searchQuery,
@@ -265,7 +331,6 @@ fun ConsoleHistoryScreen(
                 )
             }
 
-            // Single horizontal scrollable row for filters + quick shell commands (saves 4 vertical rows!)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -312,7 +377,7 @@ fun ConsoleHistoryScreen(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Large, Full-Height Terminal Console Viewport (takes 75%+ of the screen height!)
+            // Full-Height Terminal Console Viewport
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -377,7 +442,7 @@ fun ConsoleHistoryScreen(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Compact Single-Line Interactive Terminal Command Input Bar
+            // Interactive Terminal Command Input Bar
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -390,7 +455,7 @@ fun ConsoleHistoryScreen(
                     onValueChange = { commandInput = it },
                     placeholder = {
                         Text(
-                            text = "$ Commande shell (help, ls unpack, getprop...)",
+                            text = "$ Taper une commande (help, ls unpack, getprop...)",
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -429,11 +494,87 @@ fun ConsoleHistoryScreen(
                 }
             }
         } else {
-            // Sub-tab 1: Organized ROM_FORGE Directories (UNPACK, PACKED, KEY, PORT) & Port History
+            // Sub-tab 1: Action History, Progress of Each Action, and Organized ROM_FORGE Workspaces
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                item {
+                    Text(
+                        text = "Historique & Progression de Chaque Action (${uiState.actionHistory.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+
+                if (uiState.actionHistory.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(
+                                    text = "Aucune action manuelle exécutée dans cette session pour le moment.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    items(uiState.actionHistory, key = { it.id }) { act ->
+                        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "${act.moduleLabel} • ${act.actionTitle}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.ExtraBold
+                                        )
+                                    }
+                                    Text(
+                                        text = "${act.finishedAt} (${act.progressPercent}%)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Text(
+                                    text = "Cible : ${act.targetName} | ${act.summaryDetail}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                LinearProgressIndicator(
+                                    progress = { act.progressPercent / 100f },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(3.dp)
+                                        .clip(RoundedCornerShape(2.dp)),
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                        }
+                    }
+                }
+
                 item {
                     Card(
                         colors = CardDefaults.cardColors(
@@ -554,7 +695,7 @@ fun ConsoleHistoryScreen(
                                 ) {
                                     Icon(imageVector = Icons.Default.Build, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Compiler", style = MaterialTheme.typography.labelSmall)
+                                    Text("Compilator", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         }

@@ -58,6 +58,12 @@ class RomForgeStorageManager(private val context: Context) {
             } catch (_: Exception) {
             }
         }
+        val appExternal = context.getExternalFilesDir(null)
+        if (appExternal != null) {
+            val extRoot = File(appExternal, "ROM_FORGE").apply { mkdirs() }
+            ensureSubfoldersExist(extRoot)
+            return extRoot
+        }
         val internalRoot = File(context.filesDir, "ROM_FORGE").apply { mkdirs() }
         ensureSubfoldersExist(internalRoot)
         return internalRoot
@@ -174,56 +180,20 @@ class RomForgeStorageManager(private val context: Context) {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = context.contentResolver
-            var count = 0
-            val allFiles = sourceDir.walkTopDown().filter { it.isFile }.toList()
-            // Export up to 3 top-priority summary files so MediaProvider never triggers SELinux audit rate-limiting
-            val priorityFiles = allFiles.sortedBy {
-                when {
-                    it.name.endsWith(".img") || it.name.endsWith(".json") || it.name.endsWith(".txt") -> 0
-                    it.name == "build.prop" || it.name.endsWith(".xml") || it.name.endsWith(".rc") -> 1
-                    it.name.endsWith(".apk") -> 2
-                    else -> 3
-                }
-            }.take(3)
-
-            for (file in priorityFiles) {
-                val relParent = file.parentFile?.relativeTo(sourceDir)?.path ?: ""
-                val relativePath = if (relParent.isEmpty()) {
-                    "${Environment.DIRECTORY_DOWNLOADS}/ROM_FORGE/$normalizedSub"
-                } else {
-                    "${Environment.DIRECTORY_DOWNLOADS}/ROM_FORGE/$normalizedSub/$relParent"
-                }
-
-                try {
-                    val values = ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-                        put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-                    }
-                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    if (uri != null) {
-                        resolver.openOutputStream(uri)?.use { out ->
-                            file.inputStream().use { input ->
-                                input.copyTo(out)
-                            }
-                        }
-                        count++
-                    }
-                } catch (_: Exception) {
-                }
+        val localWorkspaceTarget = File(getRomForgePublicRoot(), normalizedSub).apply { mkdirs() }
+        if (sourceDir.absolutePath != localWorkspaceTarget.absolutePath) {
+            try {
+                sourceDir.copyRecursively(localWorkspaceTarget, overwrite = true)
+            } catch (_: Exception) {
             }
-            val publicDownloadPath = "/storage/emulated/0/Download/ROM_FORGE/$normalizedSub"
-            onLog("[ROM_FORGE] Dossier disponible dans : $publicDownloadPath (${allFiles.size} fichiers actifs dans l'espace ROM_FORGE, $count synchronisés via MediaStore)")
-            return@withContext publicDownloadPath
         }
-
-        sourceDir.absolutePath
+        onLog("[ROM_FORGE] Dossier actif dans : ${localWorkspaceTarget.absolutePath}")
+        localWorkspaceTarget.absolutePath
     }
 
     /**
-     * Exports a single file to `/storage/emulated/0/ROM_FORGE/<subFolder>` or `/storage/emulated/0/Download/ROM_FORGE/<subFolder>`.
+     * Exports a single file to `/storage/emulated/0/ROM_FORGE/<subFolder>` (with All Files Access)
+     * or the app's accessible external `ROM_FORGE/<subFolder>` workspace without triggering MediaStore SELinux audit bursts.
      */
     suspend fun exportSingleFileToPublicRomForge(
         sourceFile: File,
@@ -249,29 +219,16 @@ class RomForgeStorageManager(private val context: Context) {
             }
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val targetFolder = File(getRomForgePublicRoot(), normalizedSub).apply { mkdirs() }
+        val dst = File(targetFolder, sourceFile.name)
+        if (sourceFile.absolutePath != dst.absolutePath) {
             try {
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, sourceFile.name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-                    put(
-                        MediaStore.MediaColumns.RELATIVE_PATH,
-                        "${Environment.DIRECTORY_DOWNLOADS}/ROM_FORGE/$normalizedSub"
-                    )
-                }
-                val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                if (uri != null) {
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        sourceFile.inputStream().use { input -> input.copyTo(out) }
-                    }
-                    val pubPath = "/storage/emulated/0/Download/ROM_FORGE/$normalizedSub/${sourceFile.name}"
-                    onLog("[ROM_FORGE] Fichier écrit dans : $pubPath")
-                    return@withContext pubPath
-                }
+                sourceFile.copyTo(dst, overwrite = true)
             } catch (_: Exception) {
             }
         }
-        sourceFile.absolutePath
+        onLog("[ROM_FORGE] Fichier disponible dans : ${dst.absolutePath}")
+        dst.absolutePath
     }
 
     suspend fun resolveOrImportSafDirectory(

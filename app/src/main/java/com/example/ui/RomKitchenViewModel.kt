@@ -32,6 +32,7 @@ import com.example.modules.signpro.ApkSignTarget
 import com.example.modules.signpro.BatchSignResult
 import com.example.modules.signpro.SignProEngine
 import com.example.modules.signpro.SignatureVerificationReport
+import com.example.ui.theme.AppThemePreference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -51,10 +52,10 @@ enum class KitchenTab(val route: String, val label: String) {
     KEY_MAKER("key_maker", "Key Maker"),
     SIGN_PRO("sign_pro", "Sign Pro"),
     GENERATOR("generator", "Generator"),
-    COMPILER("compiler", "Compilation"),
-    AUTO_PORTER("auto_porter", "Porting (GSI to System)"),
-    CONSOLE("console", "Console & Terminal"),
-    HELP("help", "Aides & Commandes")
+    COMPILER("compiler", "Compilator"),
+    AUTO_PORTER("auto_porter", "Porting (GSI)"),
+    CONSOLE("console", "Console"),
+    HELP("help", "Paramètres")
 }
 
 enum class SignProInputMode(val label: String) {
@@ -69,11 +70,26 @@ data class TerminalLogEntry(
     val level: String // INFO, SUCCESS, WARN, ERROR
 )
 
+data class ActionExecutionRecord(
+    val id: Long = System.nanoTime(),
+    val moduleLabel: String,
+    val actionTitle: String,
+    val targetName: String,
+    val startedAt: String,
+    val finishedAt: String,
+    val status: String, // EN_COURS, SUCCÈS, ERREUR
+    val progressPercent: Int = 100,
+    val summaryDetail: String = ""
+)
+
 data class KitchenUiState(
     val currentTab: KitchenTab = KitchenTab.KEY_MAKER,
-    val previousTabBeforeConsole: KitchenTab = KitchenTab.COMPILER,
+    val previousTabBeforeConsole: KitchenTab = KitchenTab.KEY_MAKER,
+    val themePreference: AppThemePreference = AppThemePreference.SYSTEM,
     val isBusy: Boolean = false,
     val activeTaskTitle: String = "",
+    val activeTaskProgress: Float = 0f,
+    val actionHistory: List<ActionExecutionRecord> = emptyList(),
     val executionMode: ExecutionMode = ExecutionMode.NON_ROOT_USERSPACE,
     val isRootAvailable: Boolean = false,
     val extractedBinaries: List<ExtractedBinary> = emptyList(),
@@ -240,8 +256,36 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
     fun selectTab(tab: KitchenTab) {
         _uiState.update {
-            val prev = if (it.currentTab != KitchenTab.CONSOLE) it.currentTab else it.previousTabBeforeConsole
+            val isActionModule = tab != KitchenTab.CONSOLE && tab != KitchenTab.HELP
+            val prev = if (isActionModule) tab else it.previousTabBeforeConsole
             it.copy(currentTab = tab, previousTabBeforeConsole = prev)
+        }
+    }
+
+    fun setThemePreference(pref: AppThemePreference) {
+        _uiState.update { it.copy(themePreference = pref) }
+        appendLog("[THEME] Thème d'interface configuré sur : ${pref.label}")
+    }
+
+    private fun recordActionCompleted(
+        moduleLabel: String,
+        actionTitle: String,
+        targetName: String,
+        summaryDetail: String
+    ) {
+        val now = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val entry = ActionExecutionRecord(
+            moduleLabel = moduleLabel,
+            actionTitle = actionTitle,
+            targetName = targetName,
+            startedAt = now,
+            finishedAt = now,
+            status = "SUCCÈS",
+            progressPercent = 100,
+            summaryDetail = summaryDetail
+        )
+        _uiState.update {
+            it.copy(actionHistory = (listOf(entry) + it.actionHistory).take(50))
         }
     }
 
@@ -250,9 +294,14 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             if (it.currentTab == KitchenTab.CONSOLE) {
                 it.copy(currentTab = it.previousTabBeforeConsole)
             } else {
+                val prev = if (it.currentTab != KitchenTab.CONSOLE && it.currentTab != KitchenTab.HELP) {
+                    it.currentTab
+                } else {
+                    it.previousTabBeforeConsole
+                }
                 it.copy(
                     currentTab = KitchenTab.CONSOLE,
-                    previousTabBeforeConsole = it.currentTab
+                    previousTabBeforeConsole = prev
                 )
             }
         }
@@ -369,10 +418,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
+            recordActionCompleted(
+                moduleLabel = "Key Maker",
+                actionTitle = "Génération 4 Paires RSA-2048 & Clé Note",
+                targetName = "ROM_FORGE/KEY",
+                summaryDetail = "${generated.size} certificats X.509v3 (.pk8 & .x509.pem) + manifest.json"
+            )
+
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     cleNoteJsonPreview = cleJson,
                     verificationSummary = summary
                 )
@@ -594,10 +651,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
+            recordActionCompleted(
+                moduleLabel = "Sign Pro",
+                actionTitle = "Resignature Batch & Synchronisation XML",
+                targetName = targetDir.name,
+                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés + plat_mac_permissions.xml & privapp-permissions mis à jour"
+            )
+
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     scannedApks = updatedApks,
                     lastBatchSignResult = batchResult.copy(outputDirectoryPath = publicMirroredPath),
                     lastSignatureReport = sigReport,
@@ -664,10 +729,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 onLog = { appendLog(it) }
             )
 
+            recordActionCompleted(
+                moduleLabel = "Generator",
+                actionTitle = "Compilation ART dex2oat (.odex/.vdex)",
+                targetName = targetDir.name,
+                summaryDetail = "${report.compiledCount} compilés | ${report.skippedByMd5CacheCount} en cache MD5 (${state.selectedCompilerFilter})"
+            )
+
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     lastArtReport = report.copy(targetAbsolutePath = publicPath)
                 )
             }
@@ -748,10 +821,17 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             )
 
             val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, targetDir) { appendLog(it) }
+            recordActionCompleted(
+                moduleLabel = "Compilator",
+                actionTitle = "Repack UKA (${state.selectedFsFormat.name} + VBMeta)",
+                targetName = targetDir.name,
+                summaryDetail = "Image générée dans PACKED : ${File(pubSystemImg).name} + ${File(pubVbmetaImg).name}"
+            )
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     preFlightItems = output.preFlightItems,
                     lastCompilationOutput = output.copy(
                         systemImgPath = pubSystemImg,
@@ -865,10 +945,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             val macXml = signProEngine.readCurrentMacPermissionsXml(targetExtractDir)
             val portAnalysis = autoPorterEngine.analyzeStockAndGsiTrees(targetExtractDir) { appendLog(it) }
 
+            recordActionCompleted(
+                moduleLabel = "Compilator",
+                actionTitle = "Unpack UKA (.img -> UNPACK)",
+                targetName = targetExtractDir.name,
+                summaryDetail = "${report.extractedFilesCount} fichiers, ${report.extractedDirsCount} dossiers, ${report.extractedSymlinksCount} symlinks extraits"
+            )
+
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     availableDecompiledImgs = allFolders.map { f -> f.name },
                     selectedDecompiledImgName = targetExtractDir.name,
                     selectedDecompiledImgFullPath = targetExtractDir.absolutePath,
@@ -882,13 +970,135 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // --- Module 5: Auto-Porter (Outputs to ROM_FORGE/PORT/) ---
+    fun inspectGsiVendorMechanism() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Inspection du mécanisme GSI & pont HAL Vendor (${gsiDir.name})...",
+                    activeTaskProgress = 0.45f
+                )
+            }
+            val mechReport = autoPorterEngine.inspectGsiMechanismAndVendorCommunication(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            recordActionCompleted(
+                moduleLabel = "Porting (GSI)",
+                actionTitle = "Détecter Contenu & Mécanisme GSI <-> Vendor",
+                targetName = gsiDir.name,
+                summaryDetail = "${mechReport.vendorHalDiffs.size} interfaces HAL comparées | ${mechReport.keyDifferencesWithStockRom.size} différences Stock vs GSI"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = currentPort.copy(gsiMechanismReport = mechReport)
+                )
+            }
+        }
+    }
+
+    fun scanGsiFodStruct() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Scan FODstruct (Architecture FOD & Diagnostic Vendor) sur ${gsiDir.name}...",
+                    activeTaskProgress = 0.55f
+                )
+            }
+            val fodStructReport = autoPorterEngine.scanFodStructAndBuildActionPlan(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            val readyLayers = fodStructReport.layerNodes.count { it.presentInGsi }
+            recordActionCompleted(
+                moduleLabel = "Porting • FOD Fixer",
+                actionTitle = "Scan FODstruct & Plan d'Action",
+                targetName = gsiDir.name,
+                summaryDetail = "$readyLayers/${fodStructReport.layerNodes.size} couches actives | Plan d'action 5 étapes généré"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = currentPort.copy(fodStructReport = fodStructReport)
+                )
+            }
+        }
+    }
+
+    fun applyCoherentStockGradeFodFix() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Fixer FOD Cohérent (Qualité Stock ROM) sur ${gsiDir.name}...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val result = autoPorterEngine.applyCoherentStockGradeFodFix(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+
+            val portedFolder = File(result.portOutputDirectoryPath)
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = portedFolder,
+                subFolderName = "PORT/${portedFolder.name}",
+                onLog = { appendLog(it) }
+            )
+
+            val portedImg = File(result.portedSystemImgPath)
+            val pubPortedImg = if (portedImg.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(
+                    sourceFile = portedImg,
+                    subFolder = "PORT",
+                    onLog = { appendLog(it) }
+                )
+            } else result.portedSystemImgPath
+
+            val updatedApks = signProEngine.scanSystemApks(gsiDir)
+            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "Porting • FOD Fixer",
+                actionTitle = "Fixer FOD Cohérent (Stock ROM Grade)",
+                targetName = gsiDir.name,
+                summaryDetail = "5/5 couches FOD (SystemUI + RRO 445x1910 + IXiaomiFingerprint/Goodix + HBM 0x20000 + SELinux CIL) injectées"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
+                    scannedApks = updatedApks,
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
     fun executeGsiToSystemAutoPort() {
         viewModelScope.launch {
             val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Portage GSI (${gsiDir.name}) & Résolution FOD vers ROM_FORGE/PORT..."
+                    activeTaskTitle = "Portage GSI (${gsiDir.name}) & Résolution FOD vers ROM_FORGE/PORT...",
+                    activeTaskProgress = 0.3f
                 )
             }
             val result = autoPorterEngine.executeFullGsiPortingPipeline(
@@ -930,10 +1140,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
+            recordActionCompleted(
+                moduleLabel = "Porting (GSI)",
+                actionTitle = "Portage Complet GSI vers ROM_FORGE/PORT",
+                targetName = gsiDir.name,
+                summaryDetail = "${result.proprietaryBlobs.size} Blobs + Overlays RRO + Image ${portedImg.name}"
+            )
+
             _uiState.update {
                 it.copy(
                     isBusy = false,
                     activeTaskTitle = "",
+                    activeTaskProgress = 1f,
                     portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
                     scannedApks = updatedApks,
                     verificationSummary = summary

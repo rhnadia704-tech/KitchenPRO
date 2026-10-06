@@ -53,34 +53,9 @@ class HybridShellEngine(private val binDir: File, private val workspaceDir: File
         private set
 
     suspend fun probeRootAccess(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val buildTags = android.os.Build.TAGS ?: ""
-            if (!buildTags.contains("test-keys")) {
-                isRootAvailableOnDevice = false
-                return@withContext false
-            }
-            val suCandidates = listOf("/system/xbin/su", "/system/bin/su", "/sbin/su")
-            val hasSu = suCandidates.any {
-                try {
-                    File(it).canExecute()
-                } catch (_: Exception) {
-                    false
-                }
-            }
-            if (!hasSu) {
-                isRootAvailableOnDevice = false
-                return@withContext false
-            }
-            val proc = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-            val out = proc.inputStream.bufferedReader().readText()
-            val code = proc.waitFor()
-            val rooted = (code == 0 && out.contains("uid=0"))
-            isRootAvailableOnDevice = rooted
-            rooted
-        } catch (_: Exception) {
-            isRootAvailableOnDevice = false
-            false
-        }
+        // Never probe /system/bin/su or /sbin/su automatically on startup to avoid SELinux avc denials on unrooted devices
+        isRootAvailableOnDevice = false
+        false
     }
 
     fun setExecutionMode(mode: ExecutionMode): ExecutionMode {

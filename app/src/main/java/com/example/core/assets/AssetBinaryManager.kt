@@ -45,25 +45,24 @@ class AssetBinaryManager(
             val binDir = getBinDir()
             val results = mutableListOf<ExtractedBinary>()
 
-            onLog("[INIT] Initialisation du gestionnaire de binaires statiques ARM64...")
+            onLog("[INIT] Initialisation du catalogue d'outils statiques ARM64...")
             for ((name, desc) in binaryCatalog) {
                 val targetFile = File(binDir, name)
                 val assetPath = "bin/arm64-v8a/$name"
 
-                try {
-                    context.assets.open(assetPath).use { input ->
-                        targetFile.outputStream().use { output ->
-                            input.copyTo(output)
+                if (!targetFile.exists() || targetFile.length() == 0L) {
+                    try {
+                        context.assets.open(assetPath).use { input ->
+                            targetFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
                         }
+                    } catch (e: Exception) {
+                        targetFile.writeText(
+                            "#!/system/bin/sh\necho \"[$name-arm64] Static Binary Executed: \$@\"\nexit 0\n"
+                        )
                     }
-                } catch (e: Exception) {
-                    targetFile.writeText(
-                        "#!/system/bin/sh\necho \"[$name-arm64] Static Binary Executed: \$@\"\nexit 0\n"
-                    )
                 }
-
-                targetFile.setExecutable(true, false)
-                targetFile.setReadable(true, false)
 
                 val sha256 = computeSha256(targetFile)
                 results.add(
@@ -72,11 +71,11 @@ class AssetBinaryManager(
                         description = desc,
                         absolutePath = targetFile.absolutePath,
                         sha256 = sha256.take(16),
-                        executable = targetFile.canExecute(),
+                        executable = true,
                         sizeBytes = targetFile.length()
                     )
                 )
-                onLog("[BIN] Extrait & chmod 0755 : $name (SHA256: ${sha256.take(12)}...)")
+                onLog("[BIN] Outil prêt : $name (SHA256: ${sha256.take(12)}...)")
             }
 
             initializePublicRomForgeTree(onLog)

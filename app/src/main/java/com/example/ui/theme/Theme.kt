@@ -60,9 +60,20 @@ private val LightColorScheme = lightColorScheme(
     onSurfaceVariant = Color(0xFF475569)
 )
 
+enum class AppThemePreference(val label: String) {
+    SYSTEM("Suivre le système (Auto)"),
+    LIGHT("Mode Clair"),
+    DARK("Mode Sombre")
+}
+
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themePreference: AppThemePreference = AppThemePreference.SYSTEM,
+    darkTheme: Boolean = when (themePreference) {
+        AppThemePreference.SYSTEM -> isSystemInDarkTheme()
+        AppThemePreference.LIGHT -> false
+        AppThemePreference.DARK -> true
+    },
     dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {

@@ -28,10 +28,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.FolderSpecial
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
@@ -81,8 +80,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MyApplicationTheme {
-                RomForgeKitchenApp()
+            val viewModel: RomKitchenViewModel = viewModel()
+            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            MyApplicationTheme(themePreference = uiState.themePreference) {
+                RomForgeKitchenApp(viewModel = viewModel)
             }
         }
     }
@@ -103,15 +104,16 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
         BackHandler {
             if (drawerState.isOpen) {
                 coroutineScope.launch { drawerState.close() }
-            } else if (uiState.currentTab == KitchenTab.CONSOLE) {
-                viewModel.toggleConsoleTab()
+            } else if (uiState.currentTab == KitchenTab.CONSOLE || uiState.currentTab == KitchenTab.HELP) {
+                viewModel.selectTab(uiState.previousTabBeforeConsole)
             } else {
                 viewModel.selectTab(KitchenTab.KEY_MAKER)
             }
         }
     }
 
-    val coreModuleTabs = listOf(
+    // Sidebar items: Key Maker, Sign Pro, Generator, Compilator (Unpack & Repack), Porting (GSI)
+    val sidebarModules = listOf(
         KitchenTab.KEY_MAKER,
         KitchenTab.SIGN_PRO,
         KitchenTab.GENERATOR,
@@ -119,14 +121,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
         KitchenTab.AUTO_PORTER
     )
 
-    val toolsAndSupportTabs = listOf(
-        KitchenTab.CONSOLE,
-        KitchenTab.HELP
-    )
-
-    // 2-pane bottom bar: Active Module View <-> Live Terminal Console View, while all features live in the Sidebar Drawer
+    // 3-Pane Bottom Navigation Bar:
+    // 1. Action (displays the module selected from the Sidebar)
+    // 2. Console (full logs, action history, live progress, interactive command input)
+    // 3. Paramètres (theme Light/Dark/System, guides/tips, command rules, changelog & features)
     val isConsolePaneActive = uiState.currentTab == KitchenTab.CONSOLE
-    val activeWorkspaceTab = if (isConsolePaneActive) uiState.previousTabBeforeConsole else uiState.currentTab
+    val isSettingsPaneActive = uiState.currentTab == KitchenTab.HELP
+    val isActionPaneActive = !isConsolePaneActive && !isSettingsPaneActive
+    val activeSidebarModule = if (isActionPaneActive) uiState.currentTab else uiState.previousTabBeforeConsole
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -149,140 +151,140 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                             .statusBarsPadding()
                             .padding(18.dp)
                     ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Memory,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "ROM FORGE v3.0",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = "AOSP Kitchen • UKA & GSI Porter",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Memory,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = "ROM FORGE v2.5",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "AOSP Reverse-Compiler Kitchen",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "Espaces ROM_FORGE Actifs :",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                                Text(
+                                    text = "• UNPACK/ (${uiState.availableDecompiledImgs.size} systèmes)\n" +
+                                            "• PACKED/ (Images .img & vbmeta)\n" +
+                                            "• KEY/ & KEY/Data/ (Clés & Rapports)\n" +
+                                            "• PORT/ (GSI, HAL Vendor & FODstruct)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "Dossiers Structurés ROM_FORGE :",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.secondary
-                            )
-                            Text(
-                                text = "• UNPACK/ (${uiState.availableDecompiledImgs.size} systèmes)\n" +
-                                        "• PACKED/ (Images .img & vbmeta)\n" +
-                                        "• KEY/ & KEY/Data/ (Clés & Audits)\n" +
-                                        "• PORT/ (GSI & FOD Xiaomi Tucana)",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
+                    Text(
+                        text = "BARRE LATÉRALE • MODULES D'ACTION",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                    )
+
+                    sidebarModules.forEach { tab ->
+                        NavigationDrawerItem(
+                            label = {
+                                Column {
+                                    Text(
+                                        text = tab.sidebarTitle(),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = tab.subtitle(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            icon = {
+                                Icon(imageVector = tab.icon(), contentDescription = tab.sidebarTitle())
+                            },
+                            selected = activeSidebarModule == tab && isActionPaneActive,
+                            onClick = {
+                                viewModel.selectTab(tab)
+                                coroutineScope.launch { drawerState.close() }
+                            },
+                            modifier = Modifier
+                                .padding(NavigationDrawerItemDefaults.ItemPadding)
+                                .testTag("drawer_item_${tab.route}")
+                        )
                     }
-                }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
 
-                Text(
-                    text = "MODULES D'INGÉNIERIE AOSP",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-                )
-
-                coreModuleTabs.forEach { tab ->
-                    NavigationDrawerItem(
-                        label = {
-                            Column {
-                                Text(
-                                    text = tab.label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = tab.subtitle(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        },
-                        icon = {
-                            Icon(imageVector = tab.icon(), contentDescription = tab.label)
-                        },
-                        selected = uiState.currentTab == tab,
-                        onClick = {
-                            viewModel.selectTab(tab)
-                            coroutineScope.launch { drawerState.close() }
-                        },
-                        modifier = Modifier
-                            .padding(NavigationDrawerItemDefaults.ItemPadding)
-                            .testTag("drawer_item_${tab.route}")
+                    Text(
+                        text = "VOLETS SYSTÈME",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
                     )
-                }
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
-
-                Text(
-                    text = "TERMINAL & DOCUMENTATION",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-                )
-
-                toolsAndSupportTabs.forEach { tab ->
-                    NavigationDrawerItem(
-                        label = {
-                            Column {
-                                Text(
-                                    text = tab.label,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = tab.subtitle(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        },
-                        icon = {
-                            Icon(imageVector = tab.icon(), contentDescription = tab.label)
-                        },
-                        selected = uiState.currentTab == tab,
-                        onClick = {
-                            viewModel.selectTab(tab)
-                            coroutineScope.launch { drawerState.close() }
-                        },
-                        modifier = Modifier
-                            .padding(NavigationDrawerItemDefaults.ItemPadding)
-                            .testTag("drawer_item_${tab.route}")
-                    )
-                }
+                    listOf(KitchenTab.CONSOLE, KitchenTab.HELP).forEach { tab ->
+                        NavigationDrawerItem(
+                            label = {
+                                Column {
+                                    Text(
+                                        text = tab.sidebarTitle(),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = tab.subtitle(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            },
+                            icon = {
+                                Icon(imageVector = tab.icon(), contentDescription = tab.sidebarTitle())
+                            },
+                            selected = uiState.currentTab == tab,
+                            onClick = {
+                                viewModel.selectTab(tab)
+                                coroutineScope.launch { drawerState.close() }
+                            },
+                            modifier = Modifier
+                                .padding(NavigationDrawerItemDefaults.ItemPadding)
+                                .testTag("drawer_item_${tab.route}")
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(24.dp))
                 }
@@ -320,59 +322,78 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                     )
                 },
                 bottomBar = {
-                    if (!isWideScreen) {
-                        // Clean 2-Pane Navigation Bar + Sidebar Drawer Trigger
-                        NavigationBar(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        ) {
-                            // Pane 1: Active Engineering Module (opens Sidebar Drawer on re-tap or switches back from Console)
-                            NavigationBarItem(
-                                selected = !isConsolePaneActive,
-                                onClick = {
-                                    if (isConsolePaneActive) {
-                                        viewModel.selectTab(activeWorkspaceTab)
-                                    } else {
-                                        coroutineScope.launch { drawerState.open() }
-                                    }
-                                },
-                                icon = {
-                                    Icon(
-                                        imageVector = activeWorkspaceTab.icon(),
-                                        contentDescription = activeWorkspaceTab.label
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = "Volet 1 : ${activeWorkspaceTab.shortLabel()}",
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                },
-                                modifier = Modifier.testTag("nav_pane_workspace")
-                            )
+                    // 3-Pane Bottom Navigation Bar: Action | Console | Paramètres
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ) {
+                        // Volet 1 : Action (displays the active element chosen from the Sidebar)
+                        NavigationBarItem(
+                            selected = isActionPaneActive,
+                            onClick = {
+                                if (!isActionPaneActive) {
+                                    viewModel.selectTab(activeSidebarModule)
+                                } else {
+                                    coroutineScope.launch { drawerState.open() }
+                                }
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = activeSidebarModule.icon(),
+                                    contentDescription = "Action : ${activeSidebarModule.sidebarTitle()}"
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Action (${activeSidebarModule.shortLabel()})",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.testTag("nav_pane_action")
+                        )
 
-                            // Pane 2: Live Terminal & Console / Workspaces
-                            NavigationBarItem(
-                                selected = isConsolePaneActive,
-                                onClick = { viewModel.selectTab(KitchenTab.CONSOLE) },
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Terminal,
-                                        contentDescription = "Volet 2 : Console & Terminal"
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = "Volet 2 : Console (${uiState.terminalLogs.size})",
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                },
-                                modifier = Modifier.testTag("nav_tab_console")
-                            )
-                        }
+                        // Volet 2 : Console (history, full logs, live progress, interactive command input)
+                        NavigationBarItem(
+                            selected = isConsolePaneActive,
+                            onClick = { viewModel.selectTab(KitchenTab.CONSOLE) },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Terminal,
+                                    contentDescription = "Console"
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Console (${uiState.terminalLogs.size})",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.testTag("nav_tab_console")
+                        )
+
+                        // Volet 3 : Paramètres (theme Light/Dark/System, guides/tips, command rules, changelog)
+                        NavigationBarItem(
+                            selected = isSettingsPaneActive,
+                            onClick = { viewModel.selectTab(KitchenTab.HELP) },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Paramètres"
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = "Paramètres",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            modifier = Modifier.testTag("nav_tab_settings")
+                        )
                     }
                 }
             ) { innerPadding ->
@@ -385,14 +406,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                         NavigationRail(
                             modifier = Modifier.fillMaxHeight()
                         ) {
-                            KitchenTab.entries.forEach { tab ->
+                            sidebarModules.forEach { tab ->
                                 NavigationRailItem(
                                     selected = uiState.currentTab == tab,
                                     onClick = { viewModel.selectTab(tab) },
                                     icon = {
                                         Icon(
                                             imageVector = tab.icon(),
-                                            contentDescription = tab.label
+                                            contentDescription = tab.sidebarTitle()
                                         )
                                     },
                                     label = { Text(tab.shortLabel()) },
@@ -407,8 +428,9 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                             .weight(1f)
                             .fillMaxHeight()
                     ) {
-                        // Quick Module Selector Strip at top of Workspace Pane so all modules are 1-tap accessible in addition to the Sidebar Drawer
-                        if (!isWideScreen) {
+                        // Quick Sidebar Module Bar when inside the "Action" pane so the 5 sidebar modules
+                        // (Key Maker, Sign Pro, Generator, Compilator, Porting) are also 1-tap accessible
+                        if (!isWideScreen && isActionPaneActive) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                                 modifier = Modifier.fillMaxWidth()
@@ -419,7 +441,7 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                         .padding(horizontal = 8.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    KitchenTab.entries.forEach { tab ->
+                                    sidebarModules.forEach { tab ->
                                         val selected = uiState.currentTab == tab
                                         Surface(
                                             onClick = { viewModel.selectTab(tab) },
@@ -436,7 +458,7 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                             ) {
                                                 Icon(
                                                     imageVector = tab.icon(),
-                                                    contentDescription = tab.label,
+                                                    contentDescription = tab.sidebarTitle(),
                                                     tint = if (selected) MaterialTheme.colorScheme.primary
                                                     else MaterialTheme.colorScheme.onSurfaceVariant,
                                                     modifier = Modifier.size(16.dp)
@@ -508,6 +530,9 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     portHistory = portHistory,
                                     onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
                                     onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
+                                    onInspectGsiMechanism = viewModel::inspectGsiVendorMechanism,
+                                    onScanFodStruct = viewModel::scanGsiFodStruct,
+                                    onFixFodCoherentStock = viewModel::applyCoherentStockGradeFodFix,
                                     onExecuteFullAutoPort = viewModel::executeGsiToSystemAutoPort
                                 )
 
@@ -522,6 +547,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
 
                                 KitchenTab.HELP -> HelpScreen(
                                     romForgeRootPath = uiState.romForgePublicPath,
+                                    themePreference = uiState.themePreference,
+                                    onSelectThemePreference = viewModel::setThemePreference,
                                     onNavigateToTab = viewModel::selectTab,
                                     onRunCommandInTerminal = viewModel::executeInteractiveTerminalCommand
                                 )
@@ -541,25 +568,35 @@ private fun KitchenTab.icon(): ImageVector = when (this) {
     KitchenTab.COMPILER -> Icons.Default.Build
     KitchenTab.AUTO_PORTER -> Icons.Default.AccountTree
     KitchenTab.CONSOLE -> Icons.Default.Terminal
-    KitchenTab.HELP -> Icons.Default.HelpOutline
+    KitchenTab.HELP -> Icons.Default.Settings
+}
+
+private fun KitchenTab.sidebarTitle(): String = when (this) {
+    KitchenTab.KEY_MAKER -> "Key Maker"
+    KitchenTab.SIGN_PRO -> "Sign Pro"
+    KitchenTab.GENERATOR -> "Generator"
+    KitchenTab.COMPILER -> "Compilator (Unpack & Repack)"
+    KitchenTab.AUTO_PORTER -> "Porting (Portage de GSI)"
+    KitchenTab.CONSOLE -> "Console & Terminal"
+    KitchenTab.HELP -> "Paramètres & Aides"
 }
 
 private fun KitchenTab.shortLabel(): String = when (this) {
-    KitchenTab.KEY_MAKER -> "Key"
+    KitchenTab.KEY_MAKER -> "Key Maker"
     KitchenTab.SIGN_PRO -> "Sign Pro"
-    KitchenTab.GENERATOR -> "ART"
-    KitchenTab.COMPILER -> "Pack/Unpack"
+    KitchenTab.GENERATOR -> "Generator"
+    KitchenTab.COMPILER -> "Compilator"
     KitchenTab.AUTO_PORTER -> "Porting"
     KitchenTab.CONSOLE -> "Console"
-    KitchenTab.HELP -> "Aides"
+    KitchenTab.HELP -> "Paramètres"
 }
 
 private fun KitchenTab.subtitle(): String = when (this) {
     KitchenTab.KEY_MAKER -> "Génération RSA-2048 & Clé Note (-> KEY/)"
-    KitchenTab.SIGN_PRO -> "Signature APK & Audit JSON/TXT (-> KEY/Data/)"
+    KitchenTab.SIGN_PRO -> "Signature APK, Clé Entière & XML (-> KEY/Data/)"
     KitchenTab.GENERATOR -> "Compilation dex2oat .odex/.vdex & fs-verity"
-    KitchenTab.COMPILER -> "Décompilateur UNPACK & Compilateur PACKED"
-    KitchenTab.AUTO_PORTER -> "Portage GSI & FOD Xiaomi Tucana (-> PORT/)"
-    KitchenTab.CONSOLE -> "Terminal Shell Interactif & Export .txt"
-    KitchenTab.HELP -> "Instructions d'utilisation & Commandes AOSP"
+    KitchenTab.COMPILER -> "Unpack & Repack UKA EXT4/EROFS (-> UNPACK / PACKED)"
+    KitchenTab.AUTO_PORTER -> "Mécanisme GSI/Vendor, Scan FODstruct & Fix FOD Stock"
+    KitchenTab.CONSOLE -> "Historique, Logs entiers, Progression & Commandes"
+    KitchenTab.HELP -> "Thème Clair/Sombre/Système, Aides, Règles & Changelog"
 }
