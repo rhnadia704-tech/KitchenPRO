@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.DrawerValue
@@ -71,6 +72,7 @@ import com.example.ui.screens.ConsoleHistoryScreen
 import com.example.ui.screens.GeneratorScreen
 import com.example.ui.screens.HelpScreen
 import com.example.ui.screens.KeyMakerScreen
+import com.example.ui.screens.RecoreScreen
 import com.example.ui.screens.SignProScreen
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
@@ -112,13 +114,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
         }
     }
 
-    // Sidebar items: Key Maker, Sign Pro, Generator, Compilator (Unpack & Repack), Porting (GSI)
+    // Sidebar items: Key Maker, Sign Pro, Generator, Compilator (Unpack & Repack), Porting (GSI), R.E.C.O.R.E
     val sidebarModules = listOf(
         KitchenTab.KEY_MAKER,
         KitchenTab.SIGN_PRO,
         KitchenTab.GENERATOR,
         KitchenTab.COMPILER,
-        KitchenTab.AUTO_PORTER
+        KitchenTab.AUTO_PORTER,
+        KitchenTab.RECORE
     )
 
     // 3-Pane Bottom Navigation Bar:
@@ -154,15 +157,15 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(androidx.compose.ui.graphics.Color(0xFF101418)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Memory,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                                androidx.compose.foundation.Image(
+                                    painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_romforger_bolt_gear),
+                                    contentDescription = "Logo ROM Forge",
+                                    modifier = Modifier.size(36.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(12.dp))
@@ -173,7 +176,7 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     fontWeight = FontWeight.ExtraBold
                                 )
                                 Text(
-                                    text = "AOSP Kitchen • UKA & GSI Porter",
+                                    text = "R.E.C.O.R.E • UKA & GSI Porter",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -479,12 +482,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                             }
                         }
 
-                        Box(
+                        androidx.compose.animation.Crossfade(
+                            targetState = uiState.currentTab,
+                            label = "tab_crossfade",
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
-                        ) {
-                            when (uiState.currentTab) {
+                        ) { targetTab ->
+                            when (targetTab) {
                                 KitchenTab.KEY_MAKER -> KeyMakerScreen(
                                     uiState = uiState,
                                     keys = keys,
@@ -536,6 +541,14 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onExecuteFullAutoPort = viewModel::executeGsiToSystemAutoPort
                                 )
 
+                                KitchenTab.RECORE -> RecoreScreen(
+                                    uiState = uiState,
+                                    onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
+                                    onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
+                                    onRunRecoreDeepAnalysis = viewModel::runRecoreDeepAnalysis,
+                                    onRunRecoreAutonomousReconstruction = viewModel::runRecoreAutonomousReconstruction
+                                )
+
                                 KitchenTab.CONSOLE -> ConsoleHistoryScreen(
                                     uiState = uiState,
                                     portHistory = portHistory,
@@ -567,6 +580,7 @@ private fun KitchenTab.icon(): ImageVector = when (this) {
     KitchenTab.GENERATOR -> Icons.Default.Memory
     KitchenTab.COMPILER -> Icons.Default.Build
     KitchenTab.AUTO_PORTER -> Icons.Default.AccountTree
+    KitchenTab.RECORE -> Icons.Default.Psychology
     KitchenTab.CONSOLE -> Icons.Default.Terminal
     KitchenTab.HELP -> Icons.Default.Settings
 }
@@ -577,6 +591,7 @@ private fun KitchenTab.sidebarTitle(): String = when (this) {
     KitchenTab.GENERATOR -> "Generator"
     KitchenTab.COMPILER -> "Compilator (Unpack & Repack)"
     KitchenTab.AUTO_PORTER -> "Porting (Portage de GSI)"
+    KitchenTab.RECORE -> "R.E.C.O.R.E (Cerveau Rust/Z3)"
     KitchenTab.CONSOLE -> "Console & Terminal"
     KitchenTab.HELP -> "Paramètres & Aides"
 }
@@ -587,6 +602,7 @@ private fun KitchenTab.shortLabel(): String = when (this) {
     KitchenTab.GENERATOR -> "Generator"
     KitchenTab.COMPILER -> "Compilator"
     KitchenTab.AUTO_PORTER -> "Porting"
+    KitchenTab.RECORE -> "R.E.C.O.R.E"
     KitchenTab.CONSOLE -> "Console"
     KitchenTab.HELP -> "Paramètres"
 }
@@ -597,6 +613,7 @@ private fun KitchenTab.subtitle(): String = when (this) {
     KitchenTab.GENERATOR -> "Compilation dex2oat .odex/.vdex & fs-verity"
     KitchenTab.COMPILER -> "Unpack & Repack UKA EXT4/EROFS (-> UNPACK / PACKED)"
     KitchenTab.AUTO_PORTER -> "Mécanisme GSI/Vendor, Scan FODstruct & Fix FOD Stock"
+    KitchenTab.RECORE -> "DAG, Symboles ELF64, Shims, Sandbox ARM64 & Solveur Z3 SMT"
     KitchenTab.CONSOLE -> "Historique, Logs entiers, Progression & Commandes"
     KitchenTab.HELP -> "Thème Clair/Sombre/Système, Aides, Règles & Changelog"
 }

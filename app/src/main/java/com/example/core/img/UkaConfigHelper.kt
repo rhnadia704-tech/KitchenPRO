@@ -103,6 +103,72 @@ object UkaConfigHelper {
         if (symlinksLines.isNotEmpty()) {
             File(metaDir, "extracted_symlinks.txt").writeText(symlinksLines.distinct().joinToString("\n") + "\n")
         }
+
+        // Write immutable baseline snapshot ONLY once at unpack time so R.E.C.O.R.E Repack can compare
+        // the current unpacked tree against the exact original image before unpack.
+        val baseSnapshotFile = File(metaDir, "base_img_snapshot.txt")
+        if (!baseSnapshotFile.exists()) {
+            val topEntries = outputDir.listFiles()
+                ?.filter { it.name != "ROM_FORGE_META" && it.name != "config" && it.name != "lost+found" }
+                ?.map { if (it.isDirectory) "${it.name}/" else it.name }
+                ?.sorted()
+                .orEmpty()
+            val isSar = File(outputDir, "system/build.prop").exists() ||
+                    (File(outputDir, "system/bin").isDirectory && File(outputDir, "system/etc").isDirectory)
+            val archLayout = if (isSar) "SAR_SYSTEM_AS_ROOT" else "FLAT_PARTITION"
+            val mountPoint = if (isSar) "/" else "/$cleanPart"
+
+            baseSnapshotFile.writeText(
+                buildString {
+                    appendLine("# R.E.C.O.R.E IMMUTABLE BASE IMAGE SNAPSHOT (CAPTURED AT UNPACK)")
+                    appendLine("META|PARTITION_NAME=$cleanPart")
+                    appendLine("META|FILESYSTEM_TYPE=$filesystemType")
+                    appendLine("META|BLOCK_SIZE=$blockSize")
+                    appendLine("META|ORIGINAL_SIZE_BYTES=$totalSizeBytes")
+                    appendLine("META|ARCH_LAYOUT=$archLayout")
+                    appendLine("META|MOUNT_POINT=$mountPoint")
+                    appendLine("META|TOP_LEVEL_ENTRIES=${topEntries.joinToString(",")}")
+                    outputDir.walkTopDown()
+                        .filter {
+                            it != outputDir &&
+                                    !it.invariantSeparatorsPath.contains("/ROM_FORGE_META") &&
+                                    !it.invariantSeparatorsPath.contains("/config") &&
+                                    it.name != "lost+found"
+                        }
+                        .sortedBy { it.relativeTo(outputDir).invariantSeparatorsPath }
+                        .forEach { f ->
+                            val rel = f.relativeTo(outputDir).invariantSeparatorsPath
+                            val type = if (f.isDirectory) "DIR" else "FILE"
+                            val size = if (f.isFile) f.length() else 0L
+                            val crc = if (f.isFile && size <= 4 * 1024 * 1024) computeFastCrc32(f) else size
+                            appendLine("ENTRY|$rel|$type|$size|$crc")
+                        }
+                    symlinksLines.forEach { sym ->
+                        if (sym.contains("->")) {
+                            val linkRel = sym.substringBefore("->").trim().removePrefix("/")
+                            val target = sym.substringAfter("->").trim()
+                            appendLine("SYMLINK|$linkRel|$target")
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun computeFastCrc32(file: File): Long {
+        val crc = java.util.zip.CRC32()
+        val buf = ByteArray(16384)
+        return try {
+            file.inputStream().use { fis ->
+                var r: Int
+                while (fis.read(buf).also { r = it } != -1) {
+                    crc.update(buf, 0, r)
+                }
+            }
+            crc.value
+        } catch (_: Exception) {
+            file.length()
+        }
     }
 
     fun escapeFileContextPath(path: String): String {

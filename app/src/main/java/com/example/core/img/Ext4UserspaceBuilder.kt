@@ -89,16 +89,33 @@ class Ext4UserspaceBuilder {
         val cleanVolume = volumeLabel.trim().lowercase().ifEmpty { "system" }
 
         // 0. Autonomously inspect and heal SAR vs Flat partition topology before building EXT4
-        AospTopologyResolver.inspectAndResolve(
+        val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = sourceDir,
             autoHealSarConflicts = true,
             onLog = onLog
         )
 
+        // Read original unpack baseline parameters if present so the repacked .img mirrors the original .img architecture
+        val baseSnapFile = File(sourceDir, "ROM_FORGE_META/base_img_snapshot.txt")
+        val baseMetaMap = mutableMapOf<String, String>()
+        if (baseSnapFile.exists()) {
+            baseSnapFile.useLines { lines ->
+                lines.filter { it.startsWith("META|") }.forEach { line ->
+                    val kv = line.removePrefix("META|")
+                    val k = kv.substringBefore("=")
+                    val v = kv.substringAfter("=", "")
+                    baseMetaMap[k] = v
+                }
+            }
+        }
+        val effectiveVolume = baseMetaMap["PARTITION_NAME"]?.takeIf { it.isNotBlank() } ?: cleanVolume
+        val effectiveMountPoint = baseMetaMap["MOUNT_POINT"]?.takeIf { it.isNotBlank() }
+            ?: if (topology.isSarLayout) "/" else "/$effectiveVolume"
+
         // 1. Load UKA `config/<part>_fs_config` + `ROM_FORGE_META/extracted_fs_config.txt` + `etc/fs_config`
-        val fsConfigMap = loadFsConfigMap(sourceDir, cleanVolume)
-        val fileContextsMap = loadFileContextsMap(sourceDir, cleanVolume)
-        val symlinksMap = loadSymlinksMap(sourceDir, cleanVolume)
+        val fsConfigMap = loadFsConfigMap(sourceDir, effectiveVolume)
+        val fileContextsMap = loadFileContextsMap(sourceDir, effectiveVolume)
+        val symlinksMap = loadSymlinksMap(sourceDir, effectiveVolume)
 
         val allInodes = mutableListOf<PlannedInode>()
         var nextInodeNum = 11 // Inode 2 is root; Inode 11 is lost+found; 12+ are filesystem entries
@@ -396,16 +413,16 @@ class Ext4UserspaceBuilder {
             sbBuf.putInt(0x60, 0x0042)                            // s_feature_incompat (FILETYPE | EXTENTS)
             sbBuf.putInt(0x64, 0x0003)                            // s_feature_ro_compat (SPARSE_SUPER | LARGE_FILE)
 
-            val uuid = UUID.nameUUIDFromBytes(cleanVolume.toByteArray())
+            val uuid = UUID.nameUUIDFromBytes(effectiveVolume.toByteArray())
             sbBuf.position(0x68)
             sbBuf.putLong(uuid.mostSignificantBits)
             sbBuf.putLong(uuid.leastSignificantBits)
 
-            val labelBytes = cleanVolume.toByteArray(Charsets.UTF_8).copyOf(16)
+            val labelBytes = effectiveVolume.toByteArray(Charsets.UTF_8).copyOf(16)
             sbBuf.position(0x78)
             sbBuf.put(labelBytes)
 
-            val mntBytes = "/$cleanVolume".toByteArray(Charsets.UTF_8).copyOf(64)
+            val mntBytes = effectiveMountPoint.toByteArray(Charsets.UTF_8).copyOf(64)
             sbBuf.position(0x88)
             sbBuf.put(mntBytes)
 

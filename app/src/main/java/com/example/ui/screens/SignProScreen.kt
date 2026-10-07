@@ -248,11 +248,14 @@ fun SignProScreen(
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
                                     Text(
-                                        text = "${res.signedSuccess}/${res.totalApks} APKs signés en ${res.elapsedMs}ms (${res.totalBytesProcessed / 1024} KB) + XMLs synchronisés",
+                                        text = "${res.signedSuccess}/${res.totalApks} APKs signés en ${res.elapsedMs}ms (${res.totalBytesProcessed / 1024} KB) + Chaîne de Confiance OS R.E.C.O.R.E Synchronisée",
                                         style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
+                                        fontWeight = FontWeight.ExtraBold,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
                                     Text(
@@ -261,6 +264,32 @@ fun SignProScreen(
                                         fontFamily = FontFamily.Monospace,
                                         color = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
+                                    res.recoreSignReport?.let { recoreRep ->
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.2f)
+                                        )
+                                        Text(
+                                            text = "Audit Pré-Signature R.E.C.O.R.E (${recoreRep.preSignRisksDetected} risques interceptés • ${recoreRep.sharedUidGroupsCount} clusters sharedUserId) :",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                        recoreRep.risksAndAlerts.forEach { risk ->
+                                            Text(
+                                                text = "• [${risk.component}] ${risk.riskDescription}\n  -> Solution Source-Build : ${risk.sourceTreeEquivalentFix}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                        recoreRep.realignmentStepsApplied.forEach { step ->
+                                            Text(
+                                                text = "✓ $step",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

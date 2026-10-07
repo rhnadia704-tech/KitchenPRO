@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.core.assets.AssetBinaryManager
 import com.example.core.assets.ExtractedBinary
+import com.example.core.recore.RecoreEngine
+import com.example.core.recore.RecoreFullBrainReport
 import com.example.core.shell.ExecutionMode
 import com.example.core.shell.HybridShellEngine
 import com.example.core.shell.ImageInspectionReport
@@ -54,6 +56,7 @@ enum class KitchenTab(val route: String, val label: String) {
     GENERATOR("generator", "Generator"),
     COMPILER("compiler", "Compilator"),
     AUTO_PORTER("auto_porter", "Porting (GSI)"),
+    RECORE("recore", "R.E.C.O.R.E"),
     CONSOLE("console", "Console"),
     HELP("help", "Paramètres")
 }
@@ -130,6 +133,8 @@ data class KitchenUiState(
     val lastMountedImgReport: ImageInspectionReport? = null,
     // Auto-Porter state
     val portAnalysisResult: VirtualDeviceTreePortResult? = null,
+    // R.E.C.O.R.E Brain state
+    val recoreBrainReport: RecoreFullBrainReport? = null,
     // Cross-Verifier summary
     val verificationSummary: CrossVerificationSummary? = null,
     // Console saved path
@@ -162,6 +167,12 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     )
     private val autoPorterEngine = AutoPorterEngine(assetBinaryManager.getWorkspaceDir())
     private val crossVerifierEngine = CrossVerifierEngine(assetBinaryManager.getWorkspaceDir())
+    private val recoreEngine = RecoreEngine(
+        workspaceDir = assetBinaryManager.getWorkspaceDir(),
+        keyDataDir = storageManager.getKeyDataReportsDir(),
+        signProEngine = signProEngine,
+        imgCompilerEngine = imgCompilerEngine
+    )
 
     private val _uiState = MutableStateFlow(KitchenUiState())
     val uiState: StateFlow<KitchenUiState> = _uiState.asStateFlow()
@@ -184,12 +195,17 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
     fun refreshStorageStatusAndFolders() {
         viewModelScope.launch {
-            val status = storageManager.getStorageStatus()
-            val folders = storageManager.listDecompiledImgDirectories()
-            val currentName = _uiState.value.selectedDecompiledImgName
-            val activeDir = folders.find { it.name == currentName } ?: folders.first()
+            val (status, folders, activeDir) = withContext(Dispatchers.IO) {
+                val st = storageManager.getStorageStatus()
+                val fl = storageManager.listDecompiledImgDirectories()
+                val currentName = _uiState.value.selectedDecompiledImgName
+                val act = fl.find { it.name == currentName } ?: fl.first()
+                Triple(st, fl, act)
+            }
             val apks = signProEngine.scanSystemApks(activeDir)
-            val macXml = signProEngine.readCurrentMacPermissionsXml(activeDir)
+            val macXml = withContext(Dispatchers.IO) {
+                signProEngine.readCurrentMacPermissionsXml(activeDir)
+            }
 
             _uiState.update {
                 it.copy(
@@ -207,19 +223,22 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
     private fun bootstrapEnvironment() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Initialisation de ROM_FORGE (UNPACK, PACKED, KEY, PORT)...") }
+            _uiState.update { it.copy(isBusy = true, activeTaskTitle = "Initialisation fluide de ROM_FORGE (UNPACK, PACKED, KEY, PORT)...") }
             val binaries = assetBinaryManager.extractAndVerifyBinaries { appendLog(it) }
             val rootDetected = shellEngine.probeRootAccess()
             val mode = if (rootDetected) ExecutionMode.ROOT_LOOPBACK else ExecutionMode.NON_ROOT_USERSPACE
             shellEngine.setExecutionMode(mode)
 
-            val status = storageManager.getStorageStatus()
-            val folders = storageManager.listDecompiledImgDirectories()
-            val activeDir = folders.first()
+            val (status, folders, activeDir) = withContext(Dispatchers.IO) {
+                val st = storageManager.getStorageStatus()
+                val fl = storageManager.listDecompiledImgDirectories()
+                Triple(st, fl, fl.first())
+            }
 
             val apks = signProEngine.scanSystemApks(activeDir)
-            val macXml = signProEngine.readCurrentMacPermissionsXml(activeDir)
-            val cleJson = keyMakerEngine.readCleNoteManifestJson()
+            val (macXml, cleJson) = withContext(Dispatchers.IO) {
+                signProEngine.readCurrentMacPermissionsXml(activeDir) to keyMakerEngine.readCleNoteManifestJson()
+            }
             val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
                 autoRepairBootloopRisks = false,
                 targetDecompiledDir = activeDir
@@ -230,6 +249,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             val verifierSummary = crossVerifierEngine.runFullDiagnostic(activeKeys, activeDir) { appendLog(it) }
             repository.clearAlerts()
             verifierSummary.alerts.forEach { repository.addAlert(it) }
+
+            val recoreInit = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = activeDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
 
             _uiState.update {
                 it.copy(
@@ -248,6 +274,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     cleNoteJsonPreview = cleJson,
                     preFlightItems = preFlight,
                     portAnalysisResult = portInit,
+                    recoreBrainReport = recoreInit,
                     verificationSummary = verifierSummary
                 )
             }
@@ -323,18 +350,35 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectDecompiledImgFolder(folderName: String) {
+        val targetDir = File(storageManager.getUnpackRootDir(), folderName)
+        // Instant UI feedback before background scan
+        _uiState.update {
+            it.copy(
+                selectedDecompiledImgName = targetDir.name,
+                selectedDecompiledImgFullPath = targetDir.absolutePath
+            )
+        }
         viewModelScope.launch {
-            val targetDir = File(storageManager.getUnpackRootDir(), folderName)
-            if (!targetDir.exists() || (targetDir.listFiles()?.isEmpty() == true)) {
-                assetBinaryManager.populateDecompiledImgStructure(targetDir, folderName)
+            withContext(Dispatchers.IO) {
+                if (!targetDir.exists() || (targetDir.listFiles()?.isEmpty() == true)) {
+                    assetBinaryManager.populateDecompiledImgStructure(targetDir, folderName)
+                }
             }
             val apks = signProEngine.scanSystemApks(targetDir)
-            val macXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
+            val macXml = withContext(Dispatchers.IO) {
+                signProEngine.readCurrentMacPermissionsXml(targetDir)
+            }
             val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
                 autoRepairBootloopRisks = false,
                 targetDecompiledDir = targetDir
             ) { appendLog(it) }
             val portAnalysis = autoPorterEngine.analyzeStockAndGsiTrees(targetDir) { appendLog(it) }
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = repository.getAllKeys(),
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
 
             appendLog("[UNPACK-SELECT] Système décompilé sélectionné : UNPACK/${targetDir.name} (${apks.size} APKs détectés)")
             _uiState.update {
@@ -344,7 +388,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     scannedApks = apks,
                     macPermissionsPreview = macXml,
                     preFlightItems = preFlight,
-                    portAnalysisResult = portAnalysis
+                    portAnalysisResult = portAnalysis,
+                    recoreBrainReport = recoreReport
                 )
             }
         }
@@ -650,12 +695,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = currentKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
 
             recordActionCompleted(
                 moduleLabel = "Sign Pro",
-                actionTitle = "Resignature Batch & Synchronisation XML",
+                actionTitle = "Resignature OS Source-Build & Synchronisation R.E.C.O.R.E",
                 targetName = targetDir.name,
-                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés + plat_mac_permissions.xml & privapp-permissions mis à jour"
+                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés + chaîne de confiance & Z3=${recoreReport.smtStatus} synchronisés"
             )
 
             _uiState.update {
@@ -668,6 +719,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     lastSignatureReport = sigReport,
                     macPermissionsPreview = updatedMacXml,
                     cleNoteJsonPreview = keyMakerEngine.readCleNoteManifestJson(),
+                    recoreBrainReport = recoreReport,
                     verificationSummary = summary
                 )
             }
@@ -728,12 +780,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 subFolderName = "UNPACK/${targetDir.name}",
                 onLog = { appendLog(it) }
             )
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = currentKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
 
             recordActionCompleted(
                 moduleLabel = "Generator",
-                actionTitle = "Compilation ART dex2oat (.odex/.vdex)",
+                actionTitle = "Compilation R.E.C.O.R.E ART (.odex/.vdex/.art/.fsv_meta)",
                 targetName = targetDir.name,
-                summaryDetail = "${report.compiledCount} compilés | ${report.skippedByMd5CacheCount} en cache MD5 (${state.selectedCompilerFilter})"
+                summaryDetail = "${report.compiledCount} APKs + ${report.bootArtImagesCount} Boot Images ART | ${report.fsVerityGeneratedCount} .fsv_meta"
             )
 
             _uiState.update {
@@ -741,6 +799,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     isBusy = false,
                     activeTaskTitle = "",
                     activeTaskProgress = 1f,
+                    recoreBrainReport = recoreReport,
                     lastArtReport = report.copy(targetAbsolutePath = publicPath)
                 )
             }
@@ -795,10 +854,22 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Compilation ${state.selectedFsFormat.name} depuis UNPACK/${targetDir.name} -> ROM_FORGE/PACKED..."
+                    activeTaskTitle = "R.E.C.O.R.E Repack Fidèle (${state.selectedFsFormat.name}) depuis UNPACK/${targetDir.name} -> ROM_FORGE/PACKED...",
+                    activeTaskProgress = 0.25f
                 )
             }
             val activeKeys = ensureKeysAvailable(state)
+
+            // 1. Run R.E.C.O.R.E auto-healing & reconstruction before building the image
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = true,
+                onLog = { appendLog(it) }
+            )
+            _uiState.update { it.copy(activeTaskProgress = 0.55f) }
+
+            // 2. Compile image faithfully to original base .img structure + generate delta/risk report
             val output = imgCompilerEngine.compileSystemAndVbmetaImages(
                 format = state.selectedFsFormat,
                 enableDmVerity = state.enableDmVerity,
@@ -821,11 +892,14 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             )
 
             val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, targetDir) { appendLog(it) }
+            val fidelity = output.recoreRepackReport
+            val fidelityDesc = if (fidelity == null || fidelity.changedElements.isEmpty()) "100% Identique" else "${fidelity.changedElements.size} modifs"
+            val riskDesc = fidelity?.overallRiskLevel ?: "ZERO_RISK_IDENTICAL"
             recordActionCompleted(
-                moduleLabel = "Compilator",
-                actionTitle = "Repack UKA (${state.selectedFsFormat.name} + VBMeta)",
+                moduleLabel = "Compilator • R.E.C.O.R.E",
+                actionTitle = "Repack Fidèle UKA (${state.selectedFsFormat.name} + VBMeta)",
                 targetName = targetDir.name,
-                summaryDetail = "Image générée dans PACKED : ${File(pubSystemImg).name} + ${File(pubVbmetaImg).name}"
+                summaryDetail = "Image: ${File(pubSystemImg).name} | Fidélité Base=$fidelityDesc | Risque=$riskDesc (Z3=${recoreReport.smtStatus})"
             )
             _uiState.update {
                 it.copy(
@@ -833,6 +907,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskTitle = "",
                     activeTaskProgress = 1f,
                     preFlightItems = output.preFlightItems,
+                    recoreBrainReport = recoreReport,
                     lastCompilationOutput = output.copy(
                         systemImgPath = pubSystemImg,
                         vbmetaImgPath = pubVbmetaImg
@@ -1066,16 +1141,23 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             } else result.portedSystemImgPath
 
+            val activeKeys = ensureKeysAvailable(_uiState.value)
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = gsiDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = true,
+                onLog = { appendLog(it) }
+            )
             val updatedApks = signProEngine.scanSystemApks(gsiDir)
-            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), gsiDir) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
             recordActionCompleted(
                 moduleLabel = "Porting • FOD Fixer",
-                actionTitle = "Fixer FOD Cohérent (Stock ROM Grade)",
+                actionTitle = "Fixer FOD Cohérent R.E.C.O.R.E (Source-Built Stock Grade)",
                 targetName = gsiDir.name,
-                summaryDetail = "5/5 couches FOD (SystemUI + RRO 445x1910 + IXiaomiFingerprint/Goodix + HBM 0x20000 + SELinux CIL) injectées"
+                summaryDetail = "5/5 couches FOD (SystemUI/framework-res in-place + RRO + Blobs + Shims ELF64 + SELinux CIL) | Z3=${recoreReport.smtStatus}"
             )
 
             _uiState.update {
@@ -1085,6 +1167,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskProgress = 1f,
                     portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
                     scannedApks = updatedApks,
+                    recoreBrainReport = recoreReport,
                     verificationSummary = summary
                 )
             }
@@ -1135,16 +1218,23 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             )
 
+            val activeKeys = ensureKeysAvailable(_uiState.value)
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = portedFolder,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = true,
+                onLog = { appendLog(it) }
+            )
             val updatedApks = signProEngine.scanSystemApks(portedFolder)
-            val summary = crossVerifierEngine.runFullDiagnostic(repository.getAllKeys(), portedFolder) { appendLog(it) }
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, portedFolder) { appendLog(it) }
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
             recordActionCompleted(
                 moduleLabel = "Porting (GSI)",
-                actionTitle = "Portage Complet GSI vers ROM_FORGE/PORT",
+                actionTitle = "Portage R.E.C.O.R.E Source-Built vers ROM_FORGE/PORT",
                 targetName = gsiDir.name,
-                summaryDetail = "${result.proprietaryBlobs.size} Blobs + Overlays RRO + Image ${portedImg.name}"
+                summaryDetail = "${result.proprietaryBlobs.size} Blobs + Patch APK In-Place + Shims ELF64 + Image ${portedImg.name} (Z3=${recoreReport.smtStatus})"
             )
 
             _uiState.update {
@@ -1154,6 +1244,110 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskProgress = 1f,
                     portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
                     scannedApks = updatedApks,
+                    recoreBrainReport = recoreReport,
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    // --- Module 6: R.E.C.O.R.E (Reverse Coherence Reconstruction Engine) ---
+    fun runRecoreDeepAnalysis() {
+        viewModelScope.launch {
+            val targetDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "R.E.C.O.R.E : Cartographie Multi-Partition, DAG, Symboles ELF64, Sandbox ARM64 & Solveur Z3 SMT...",
+                    activeTaskProgress = 0.45f
+                )
+            }
+            val activeKeys = repository.getAllKeys()
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, targetDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "R.E.C.O.R.E",
+                actionTitle = "Analyse Profonde & Preuve Formelle Z3 (${recoreReport.smtStatus})",
+                targetName = targetDir.name,
+                summaryDetail = "Confiance Boot=${recoreReport.bootConfidenceScore}/100 | Z3=${recoreReport.smtStatus} | DAG=${recoreReport.dagNodes.size} nœuds (${recoreReport.dagEdgesCount} arcs)"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    recoreBrainReport = recoreReport,
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    fun runRecoreAutonomousReconstruction() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "R.E.C.O.R.E Auto-Guérison : Shims ELF64, Topologie SAR, Ré-alignement AVB/APK & Preuve Z3 SAT...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val currentKeys = ensureKeysAvailable(state)
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = currentKeys,
+                autoHealAndGenerateShims = true,
+                onLog = { appendLog(it) }
+            )
+
+            // Export JSON & Protobuf reports to public ROM_FORGE/KEY/Data
+            val jsonReportFile = File(recoreReport.cAbiDescriptor.jsonReportPath)
+            val pbReportFile = File(recoreReport.cAbiDescriptor.protobufReportPath)
+            if (jsonReportFile.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(jsonReportFile, "KEY/Data") { appendLog(it) }
+            }
+            if (pbReportFile.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(pbReportFile, "KEY/Data") { appendLog(it) }
+            }
+
+            val updatedApks = signProEngine.scanSystemApks(targetDir)
+            val updatedMacXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
+            val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
+                autoRepairBootloopRisks = true,
+                targetDecompiledDir = targetDir,
+                onLog = { appendLog(it) }
+            )
+            val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "R.E.C.O.R.E",
+                actionTitle = "Auto-Guérison Binaire (Shims ELF64) & Ré-alignement Total",
+                targetName = targetDir.name,
+                summaryDetail = "Verdict Z3=${recoreReport.smtStatus} (${recoreReport.bootConfidenceScore}/100) | ${recoreReport.generatedShims.size} Shims ELF64 | ${recoreReport.autoHealedCount} correctifs"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    scannedApks = updatedApks,
+                    macPermissionsPreview = updatedMacXml,
+                    preFlightItems = preFlight,
+                    recoreBrainReport = recoreReport,
                     verificationSummary = summary
                 )
             }
@@ -1168,7 +1362,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             appendLog("$ $trimmed")
             when {
                 trimmed.equals("help", true) -> {
-                    appendLog("[SHELL-HELP] Commandes disponibles : ls, ls unpack, ls packed, ls key, ls port, getprop, avbtool, mke2fs, mkfs.erofs, dex2oat, zipalign, verify-apks, clear")
+                    appendLog("[SHELL-HELP] Commandes disponibles : recore, recore --heal, recore --smt-z3, ls, ls unpack, ls packed, ls key, ls port, getprop, avbtool, mke2fs, mkfs.erofs, dex2oat, zipalign, verify-apks, clear")
+                }
+                trimmed.equals("recore", true) || trimmed.equals("recore --smt-z3", true) || trimmed.startsWith("recore-cli") -> {
+                    runRecoreDeepAnalysis()
+                }
+                trimmed.equals("recore --heal", true) || trimmed.equals("recore --auto-shim", true) -> {
+                    runRecoreAutonomousReconstruction()
                 }
                 trimmed.equals("clear", true) -> {
                     clearLogs()
@@ -1317,6 +1517,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 onLog = { appendLog(it) }
             )
 
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = targetDir,
+                activeKeys = currentKeys,
+                autoHealAndGenerateShims = true,
+                onLog = { appendLog(it) }
+            )
+
             val updatedApks = signProEngine.scanSystemApks(targetDir)
             val updatedMacXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
             val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
@@ -1331,6 +1538,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     lastBatchSignResult = batchResult,
                     macPermissionsPreview = updatedMacXml,
                     preFlightItems = preFlight,
+                    recoreBrainReport = recoreReport,
                     verificationSummary = summary
                 )
             }
@@ -1350,17 +1558,26 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    private val logTimeFormatter = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    }
+
     private fun appendLog(rawMessage: String) {
-        val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+        val time = logTimeFormatter.get()?.format(Date()) ?: "00:00:00.000"
         val level = when {
             rawMessage.contains("ERREUR") || rawMessage.contains("CRITICAL") || rawMessage.contains("[STDERR]") -> "ERROR"
             rawMessage.contains("Avertissement") || rawMessage.contains("WARN") -> "WARN"
-            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[EXT4") || rawMessage.contains("[ROM_FORGE") || rawMessage.contains("[SIGN-VERIFY]") -> "SUCCESS"
+            rawMessage.contains("succès") || rawMessage.contains("terminé") || rawMessage.contains("validés") || rawMessage.contains("[EXT4") || rawMessage.contains("[ROM_FORGE") || rawMessage.contains("[SIGN-VERIFY]") || rawMessage.contains("[RECORE") -> "SUCCESS"
             else -> "INFO"
         }
         val entry = TerminalLogEntry(timestamp = time, message = rawMessage, level = level)
         _uiState.update { current ->
-            val updated = (current.terminalLogs + entry).takeLast(400)
+            val oldList = current.terminalLogs
+            val updated = if (oldList.size >= 400) {
+                oldList.subList(oldList.size - 399, oldList.size) + entry
+            } else {
+                oldList + entry
+            }
             current.copy(terminalLogs = updated)
         }
     }

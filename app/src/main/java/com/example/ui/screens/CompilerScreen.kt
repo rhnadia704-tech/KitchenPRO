@@ -279,11 +279,14 @@ fun CompilerScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
                                 Text(
-                                    text = "Compilation Réussie (${out.format.name} en ${out.elapsedMs}ms)",
+                                    text = "Compilation R.E.C.O.R.E Réussie (${out.format.name} en ${out.elapsedMs}ms)",
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
+                                    fontWeight = FontWeight.ExtraBold,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
@@ -292,6 +295,89 @@ fun CompilerScreen(
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
+
+                                out.recoreRepackReport?.let { fid ->
+                                    androidx.compose.material3.HorizontalDivider(
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.2f)
+                                    )
+                                    Text(
+                                        text = "Fidélité Structurelle R.E.C.O.R.E vs Image de Base (${fid.baseArchitectureLayout} • Point de montage '${fid.baseMountPoint}')",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Text(
+                                        text = fid.overallRiskSummary,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    fid.recoreCoherenceGuarantees.forEach { g ->
+                                        Text(
+                                            text = "✓ $g",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
+
+                                    if (fid.changedElements.isNotEmpty()) {
+                                        Text(
+                                            text = "Retour R.E.C.O.R.E sur les éléments modifiés (${fid.changedElements.size}) & Risques associés :",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                        fid.changedElements.take(20).forEach { ch ->
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier.padding(10.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Text(
+                                                            text = "[${ch.changeType}] ${ch.relativePath}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                        Text(
+                                                            text = ch.riskLevel,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            color = if (ch.riskLevel == "HIGH_BOOT_CRITICAL") MaterialTheme.colorScheme.error
+                                                            else MaterialTheme.colorScheme.secondary
+                                                        )
+                                                    }
+                                                    Text(
+                                                        text = "Catégorie : ${ch.category} • Taille : ${ch.sizeDeltaDesc}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Text(
+                                                        text = "Risque impliqué : ${ch.riskExplanation}",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                    Text(
+                                                        text = "Action R.E.C.O.R.E : ${ch.recoreMitigationApplied}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaterialTheme.colorScheme.secondary
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

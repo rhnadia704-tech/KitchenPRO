@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Binary Digits & Circuit Traces Falling Below the Gear (#2EDD69 & #323538) -->
+    <!-- Circuit trace left -->
+    <path
+        android:fillColor="#323538"
+        android:pathData="M29,60 L29,76 L32,79 L32,84 L30,84 L30,80 L27,77 L27,60 Z" />
+    <path
+        android:fillColor="#323538"
+        android:pathData="M28,60 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+
+    <!-- Flat Green Binary Stream ("1" and "0" columns + data blocks) -->
+    <path
+        android:fillColor="#2EDD69"
+        android:pathData="M31,62 h3 v8 h-3 z M31,73 h3 v8 h-3 z M36,68 h4 v11 h-4 z M36,82 h4 v9 h-4 z M42,74 h4 v12 h-4 z M42,89 h3 v7 h-3 z M48,76 h5 v12 h-5 z M48,91 h3 v8 h-3 z M55,75 h4 v11 h-4 z M55,89 h4 v9 h-4 z M61,72 h4 v10 h-4 z M61,85 h3 v9 h-3 z M67,66 h4 v11 h-4 z M67,80 h4 v8 h-4 z M73,54 h5 v12 h-5 z M73,69 h4 v9 h-4 z" />
+
+    <!-- Android Robot Head Dome & Antennas (Flat Green #2EDD69) -->
+    <!-- Left Antenna -->
+    <path
+        android:fillColor="#2EDD69"
+        android:pathData="M37,14 L43,25 L40,26.5 L34,15.5 Z" />
+    <!-- Right Antenna -->
+    <path
+        android:fillColor="#2EDD69"
+        android:pathData="M71,14 L74,15.5 L68,26.5 L65,25 Z" />
+    <!-- Upper Head Dome -->
+    <path
+        android:fillColor="#2EDD69"
+        android:pathData="M28,43 C28,28 39.5,20 54,20 C68.5,20 80,28 80,43 Z" />
+    <!-- Lower Body Band behind Gear -->
+    <path
+        android:fillColor="#2EDD69"
+        android:pathData="M28,45.5 L80,45.5 L80,55 L28,55 Z" />
+
+    <!-- Android Eyes (Dark Charcoal #2B2E30) -->
+    <path
+        android:fillColor="#2B2E30"
+        android:pathData="M42,34 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+    <path
+        android:fillColor="#2B2E30"
+        android:pathData="M66,34 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+
+    <!-- Dark Separator Line under Head Dome -->
+    <path
+        android:fillColor="#2B2E30"
+        android:pathData="M28,43 h52 v2.5 h-52 z" />
+
+    <!-- Central Dark Mechanical Cog Gear (#323538) centered at (52, 57) -->
+    <!-- Gear Outer Teeth Silhouette -->
+    <path
+        android:fillColor="#323538"
+        android:pathData="M49.5,35 h5 l1,4 l3.8,1.2 l3,-2.6 l3.6,3.6 l-2.6,3 l1.2,3.8 l4,1 v5 l-4,1 l-1.2,3.8 l2.6,3 l-3.6,3.6 l-3,-2.6 l-3.8,1.2 l-1,4 h-5 l-1,-4 l-3.8,-1.2 l-3,2.6 l-3.6,-3.6 l2.6,-3 l-1.2,-3.8 l-4,-1 v-5 l4,-1 l1.2,-3.8 l-2.6,-3 l3.6,-3.6 l3,2.6 l3.8,-1.2 z" />
+    <!-- Gear Solid Core Disc -->
+    <path
+        android:fillColor="#323538"
+        android:pathData="M52,57 m-18.5,0 a18.5,18.5 0 1,0 37,0 a18.5,18.5 0 1,0 -37,0" />
+
+    <!-- Diagonal White Open-End Wrench (#FFFFFF) Gripping the Central Hexagonal Bolt -->
+    <!-- Wrench Head & Handle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M51,48 C56.5,47.5 61.5,51.5 62,57 C62.2,59 61.6,61 60.5,62.5 L83,84 C85,86 85,89.5 83,91.5 C81,93.5 77.5,93.5 75.5,91.5 L53,69 C51,70 48.5,70.2 46.2,69.2 C42.5,67.6 40.5,63.5 41.2,59.2 L47.5,64.5 L54.5,62.5 L56.5,55.5 L50.2,49.5 Z" />
+    <!-- Wrench Handle Hanging Hole -->
+    <path
+        android:fillColor="#2B2E30"
+        android:pathData="M79.2,87.8 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0" />
+
+    <!-- Central Hexagonal Nut / Bolt (#54585C) & Inner Dark Core (#2B2E30) -->
+    <path
+        android:fillColor="#54585C"
+        android:pathData="M52,50.5 L57.6,53.7 L57.6,60.3 L52,63.5 L46.4,60.3 L46.4,53.7 Z" />
+    <path
+        android:fillColor="#2B2E30"
+        android:pathData="M52,57 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0" />
+</vector>

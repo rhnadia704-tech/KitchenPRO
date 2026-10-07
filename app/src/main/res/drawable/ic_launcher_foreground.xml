@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/img_app_icon_fg"
+        android:drawable="@drawable/romforger_bolt_gear_logo_1791358579198"
         android:gravity="center" />
 </layer-list>

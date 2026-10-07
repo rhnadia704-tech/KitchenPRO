@@ -190,19 +190,31 @@ fun GeneratorScreen(
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
                                 Text(
-                                    text = "Bilan ART (${rep.targetDecompiledFolder}) : ${rep.compiledCount} compilés | ${rep.skippedByMd5CacheCount} en cache MD5 | ${rep.fsVerityGeneratedCount} fsvmeta",
+                                    text = "Bilan R.E.C.O.R.E ART (${rep.targetDecompiledFolder}) : ${rep.compiledCount} APKs (.odex/.vdex/.art) | ${rep.bootArtImagesCount} Boot Images ART | ${rep.fsVerityGeneratedCount} .fsv_meta",
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
+                                    fontWeight = FontWeight.ExtraBold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                                 Text(
-                                    text = "Sortie : ${rep.targetAbsolutePath}",
+                                    text = "• Bootclasspath : ${rep.bootArtImagesCount} .art, ${rep.bootOatImagesCount} .oat, ${rep.bootVdexImagesCount} .vdex, ${rep.profilesGeneratedCount} profils .prof\n" +
+                                            "• Zygote64      : preloaded-classes & dirty-image-objects synchronisés\n" +
+                                            "• Sortie        : ${rep.targetAbsolutePath}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
+                                rep.recoreCoherenceNotes.forEach { note ->
+                                    Text(
+                                        text = "✓ $note",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
                             }
                         }
                     }
