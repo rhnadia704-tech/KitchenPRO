@@ -116,6 +116,67 @@ class KeyMakerEngine(private val filesDir: File) {
         generatedList
     }
 
+    /**
+     * Dynamically generates a dedicated RSA-2048 key pair (.pk8 + .x509.pem) for any additional key role
+     * discovered in an unpacked .img (e.g. networkstack, sdk_sandbox, bluetooth, vendor_overlay, custom_key_N)
+     * so Sign Pro can preserve a 1-to-1 key tree isomorphism with the base image regardless of key count.
+     */
+    suspend fun generateSingleRoleKey(
+        role: String,
+        organization: String = "LineageOS-Custom-Forge",
+        commonName: String = "AOSP-Security-Chain",
+        countryCode: String = "FR",
+        validityYears: Int = 25,
+        onLog: ((String) -> Unit)? = null
+    ): KeyManifestEntity = withContext(Dispatchers.IO) {
+        val keystoreDir = getKeystoreDir()
+        val cleanRole = role.lowercase().replace(Regex("[^a-z0-9_-]"), "_").ifBlank { "custom_key" }
+        val now = System.currentTimeMillis()
+
+        val kpg = KeyPairGenerator.getInstance("RSA")
+        kpg.initialize(2048, SecureRandom())
+        val keyPair = kpg.generateKeyPair()
+
+        val subjectDn = "CN=$commonName-$cleanRole, OU=AOSP-ROM-Forge, O=$organization, C=$countryCode"
+        val pk8File = File(keystoreDir, "$cleanRole.pk8")
+        pk8File.writeBytes(keyPair.private.encoded)
+
+        val certDerBytes = buildSignedX509CertificateDer(
+            publicKey = keyPair.public,
+            privateKey = keyPair.private,
+            subjectDn = subjectDn,
+            serialNumber = now + cleanRole.hashCode(),
+            validityYears = validityYears
+        )
+
+        val pemFile = File(keystoreDir, "$cleanRole.x509.pem")
+        val b64Cert = Base64.encodeToString(certDerBytes, Base64.DEFAULT).trim()
+        val pemContent = buildString {
+            appendLine("-----BEGIN CERTIFICATE-----")
+            appendLine(b64Cert)
+            appendLine("-----END CERTIFICATE-----")
+        }
+        pemFile.writeText(pemContent)
+
+        val sha256Digest = MessageDigest.getInstance("SHA-256").digest(certDerBytes)
+        val fingerprintColon = sha256Digest.joinToString(":") { "%02X".format(it) }
+        val certHexString = certDerBytes.joinToString("") { "%02x".format(it) }
+
+        onLog?.invoke("[KEY-MAKER] Clé additionnelle RSA-2048 générée pour l'arborescence de l'image : '$cleanRole' (SHA256: ${fingerprintColon.take(23)}...)")
+
+        KeyManifestEntity(
+            role = cleanRole,
+            algorithm = "RSA-2048 / SHA256withRSA",
+            keySize = 2048,
+            subjectDn = subjectDn,
+            sha256Fingerprint = fingerprintColon,
+            pk8Path = pk8File.absolutePath,
+            pemPath = pemFile.absolutePath,
+            publicHexBlock = certHexString,
+            createdAt = now
+        )
+    }
+
     fun writeCleNoteManifestJson(keys: List<KeyManifestEntity>, organization: String) {
         val root = JSONObject()
         root.put("schema", "AOSP-KeyMaker-CleNote-v2.4")

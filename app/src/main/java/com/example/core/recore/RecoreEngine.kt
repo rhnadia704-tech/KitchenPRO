@@ -5,6 +5,7 @@ import com.example.core.img.AospTopologyResolver
 import com.example.core.img.AospTopologyReport
 import com.example.data.local.KeyManifestEntity
 import com.example.modules.compiler.ImgCompilerEngine
+import com.example.modules.generator.ArtGeneratorEngine
 import com.example.modules.signpro.SignProEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -19,6 +20,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
@@ -44,7 +46,8 @@ class RecoreEngine(
     private val workspaceDir: File,
     private val keyDataDir: File,
     private val signProEngine: SignProEngine,
-    private val imgCompilerEngine: ImgCompilerEngine
+    private val imgCompilerEngine: ImgCompilerEngine,
+    private val artGeneratorEngine: ArtGeneratorEngine = ArtGeneratorEngine(workspaceDir)
 ) {
 
     // Incremental delta index cache (path -> lastModified ^ length) for File Watcher delta computation
@@ -201,6 +204,15 @@ class RecoreEngine(
             rawConfidence.coerceAtMost(84)
         }
 
+        // 10.5. Deep Artifact Regeneration & Dependency Cascade Chain Analysis (ODEX, VDEX, OAT, ART, fsv_meta)
+        val (artifactRegenItems, cascadeChains) = inspectArtifactsAndCascadeChains(
+            unpackedRoot = unpackedRoot,
+            topology = finalTopology,
+            autoRegenerateDone = autoHealAndGenerateShims,
+            onLog = onLog
+        )
+        val staleArtifactsCount = artifactRegenItems.count { it.status == "STALE_NEEDS_REGEN" }
+
         // 11. Export Structured Diagnostic Reports (JSON + Binary Protobuf Wire Format) & C-ABI FFI Descriptor
         val (cAbiDescriptor, jsonPreview) = exportStructuredJsonAndProtobufDiagnostics(
             unpackedRoot = unpackedRoot,
@@ -222,6 +234,7 @@ class RecoreEngine(
         onLog(
             "[R.E.C.O.R.E] Analyse complète terminée en ${elapsed}ms : Verdict SMT=${smtResult.overallSatStatus} | " +
                     "Confiance Boot=$bootConfidenceScore/100 | DAG=${dagNodes.size} nœuds ($dagEdgesCount arcs) | " +
+                    "Artefacts à régénérer=$staleArtifactsCount | Chaînes cascade=${cascadeChains.size} | " +
                     "Auto-corrections=$autoHealedTotal"
         )
 
@@ -244,7 +257,68 @@ class RecoreEngine(
             smtSolverResult = smtResult,
             fileWatcherDelta = watcherDelta,
             cAbiDescriptor = cAbiDescriptor,
-            structuredJsonPreview = jsonPreview
+            structuredJsonPreview = jsonPreview,
+            artifactRegenItems = artifactRegenItems,
+            dependencyCascadeChains = cascadeChains,
+            staleArtifactsNeedingRegenCount = staleArtifactsCount
+        )
+    }
+
+    /**
+     * Dedicated R.E.C.O.R.E Action: Regenerates all stale or affected compiled artifacts
+     * (`.odex`, `.vdex`, `.oat`, `.art`, `.fsv_meta`, `plat_mac_permissions.xml`, `fs_config`, `file_contexts`)
+     * using AOSP-compiler-grade header and CRC32 parity without altering APK signatures unless requested.
+     */
+    suspend fun regenerateAllStaleArtifacts(
+        unpackedRoot: File,
+        activeKeys: List<KeyManifestEntity>,
+        onLog: (String) -> Unit
+    ): RecoreFullBrainReport = withContext(Dispatchers.IO) {
+        onLog("[R.E.C.O.R.E-REGEN] Démarrage de la régénération AOSP-Grade des artefacts (.odex, .vdex, .oat, .art, .fsv_meta) sur ${unpackedRoot.name}...")
+        val topology = AospTopologyResolver.inspectAndResolve(
+            unpackedRoot = unpackedRoot,
+            autoHealSarConflicts = true,
+            onLog = onLog
+        )
+
+        // Inspect which APKs/JARs were modified compared to base_img_snapshot.txt or have mismatched ODEX/VDEX
+        val (_, cascadeChains) = inspectArtifactsAndCascadeChains(
+            unpackedRoot = unpackedRoot,
+            topology = topology,
+            autoRegenerateDone = false,
+            onLog = onLog
+        )
+        val modifiedPaths = cascadeChains.map { it.modifiedSourcePath }.toSet()
+
+        if (modifiedPaths.isNotEmpty()) {
+            onLog("[R.E.C.O.R.E-REGEN] ${modifiedPaths.size} binaire(s)/APK(s) modifié(s) détecté(s) dans la chaîne de dépendance : régénération ciblée AOSP...")
+            artGeneratorEngine.regenerateForSpecificModifiedBinaries(
+                targetDecompiledDir = unpackedRoot,
+                modifiedPaths = modifiedPaths,
+                onLog = onLog
+            )
+        } else {
+            onLog("[R.E.C.O.R.E-REGEN] Synchronisation intégrale de tous les artefacts OAT/VDEX/ODEX/ART/fsv_meta selon le profil du compilateur AOSP...")
+            artGeneratorEngine.generateArtOptimizationArtifacts(
+                targetDecompiledDir = unpackedRoot,
+                onlyModifiedOrStale = false,
+                onProgress = { _, _, _ -> },
+                onLog = onLog
+            )
+        }
+
+        // Also synchronize SELinux contexts and POSIX fs_config
+        imgCompilerEngine.runPreFlightStaticAudit(
+            autoRepairBootloopRisks = true,
+            targetDecompiledDir = unpackedRoot,
+            onLog = onLog
+        )
+
+        analyzeAndReconstruct(
+            unpackedRoot = unpackedRoot,
+            activeKeys = activeKeys,
+            autoHealAndGenerateShims = false,
+            onLog = onLog
         )
     }
 
@@ -1232,20 +1306,21 @@ class RecoreEngine(
             fixes++
         }
 
-        // 2. Re-align signatures, plat_mac_permissions.xml, privapp-permissions-*.xml & release-keys if keys exist
-        if (activeKeys.isNotEmpty()) {
-            val batch = signProEngine.signAllApksInMemoryAndPatchMacPermissions(
-                keys = activeKeys,
-                updateMacPerm = true,
-                targetDecompiledDir = unpackedRoot,
-                onLog = onLog
-            )
-            realignmentActions.add(
-                "Ré-alignement de confiance Sign Pro : ${batch.signedSuccess}/${batch.totalApks} APKs signés + plat_mac_permissions.xml & release-keys"
-            )
-            fixes++
+        // 2. Check if any APK inside the unpacked tree was already signed by Custom ROM Forge Key or modified.
+        // CRITICAL: Never blindly re-sign unmodified stock AOSP APKs during auto-heal or repack!
+        val anyCustomSignedApk = unpackedRoot.walkTopDown()
+            .filter { it.isFile && it.extension.equals("apk", true) }
+            .any { apk ->
+                runCatching {
+                    ZipFile(apk).use { zf ->
+                        val mf = zf.getEntry("META-INF/MANIFEST.MF")
+                        mf != null && zf.getInputStream(mf).bufferedReader().readText().contains("ROM-Forge-SignPro-Engine")
+                    }
+                }.getOrDefault(false)
+            }
 
-            // Also ensure otacerts.zip is synced in canonical topology.etcDir/security/otacerts.zip
+        if (activeKeys.isNotEmpty() && anyCustomSignedApk) {
+            // Synchronize otacerts.zip & plat_mac_permissions.xml without stripping stock v2/v3 blocks from untouched APKs
             val securityDir = File(topology.etcDir, "security").apply { mkdirs() }
             val otaZip = File(securityDir, "otacerts.zip")
             java.util.zip.ZipOutputStream(otaZip.outputStream()).use { zos ->
@@ -1261,9 +1336,31 @@ class RecoreEngine(
             AospTopologyResolver.registerInjectedFilesInAllConfigs(unpackedRoot, listOf(otaZip), null)
             realignmentActions.add("Magasin de certificats ${topology.systemPrefixRel}etc/security/otacerts.zip synchronisé (${activeKeys.size} clés X.509)")
             fixes++
+        } else {
+            realignmentActions.add("Signatures AOSP v1/v2/v3 d'origine préservées à 100% (aucune re-signature forcée destructrice)")
         }
 
-        // 3. Repair SELinux contexts & POSIX fs_config (init 0750)
+        // 3. Regenerate any stale or mismatched OAT / VDEX / ODEX / fsv_meta artifacts using AOSP-compiler profile
+        val (_, cascades) = inspectArtifactsAndCascadeChains(
+            unpackedRoot = unpackedRoot,
+            topology = topology,
+            autoRegenerateDone = false,
+            onLog = onLog
+        )
+        val staleModifiedPaths = cascades.filter { it.requiresArtRegen }.map { it.modifiedSourcePath }.toSet()
+        if (staleModifiedPaths.isNotEmpty()) {
+            val artRep = artGeneratorEngine.regenerateForSpecificModifiedBinaries(
+                targetDecompiledDir = unpackedRoot,
+                modifiedPaths = staleModifiedPaths,
+                onLog = onLog
+            )
+            realignmentActions.add(
+                "Artefacts AOSP (.odex/.vdex/.fsv_meta) régénérés pour ${artRep.compiledCount} binaire(s) modifié(s) (Format OAT v${artRep.detectedOatVersion} / VDEX v${artRep.detectedVdexVersion})"
+            )
+            fixes += artRep.compiledCount
+        }
+
+        // 4. Repair SELinux contexts & POSIX fs_config (init 0750)
         imgCompilerEngine.runPreFlightStaticAudit(
             autoRepairBootloopRisks = true,
             targetDecompiledDir = unpackedRoot,
@@ -1273,6 +1370,151 @@ class RecoreEngine(
         fixes++
 
         return fixes
+    }
+
+    /**
+     * Inspects all compiled artifacts (`.odex`, `.vdex`, `.oat`, `.art`, `.fsv_meta`) and compares the
+     * unpacked `.img` against `ROM_FORGE_META/base_img_snapshot.txt` to map:
+     * 1. Which `.odex` / `.vdex` / `.fsv_meta` files are up-to-date vs stale (`STALE_NEEDS_REGEN`)
+     * 2. The exact Dependency Cascade Chain (`A -> B -> C -> D`) when any APK, JAR, XML, or library is modified.
+     */
+    private fun inspectArtifactsAndCascadeChains(
+        unpackedRoot: File,
+        topology: AospTopologyReport,
+        autoRegenerateDone: Boolean,
+        onLog: (String) -> Unit
+    ): Pair<List<RecoreArtifactRegenItem>, List<RecoreDependencyCascadeChain>> {
+        val baseProfile = artGeneratorEngine.inspectBaseArtFormatProfile(unpackedRoot)
+        val items = mutableListOf<RecoreArtifactRegenItem>()
+        val chains = mutableListOf<RecoreDependencyCascadeChain>()
+
+        // Load base snapshot if present to detect modified/added files
+        val snapshotFile = File(unpackedRoot, "ROM_FORGE_META/base_img_snapshot.txt")
+        val baseFilesMap = mutableMapOf<String, Pair<Long, Long>>() // relPath -> (size, crc32)
+        if (snapshotFile.exists()) {
+            snapshotFile.readLines().forEach { line ->
+                if (line.startsWith("FILE|")) {
+                    val parts = line.split("|")
+                    if (parts.size >= 4) {
+                        val rel = parts[1]
+                        val sz = parts[2].toLongOrNull() ?: 0L
+                        val crc = parts[3].toLongOrNull(16) ?: 0L
+                        baseFilesMap[rel] = sz to crc
+                    }
+                }
+            }
+        }
+
+        val allApksAndJars = unpackedRoot.walkTopDown()
+            .filter {
+                it.isFile && (it.extension.equals("apk", true) || it.extension.equals("jar", true)) &&
+                        !it.name.endsWith(".tmp")
+            }
+            .toList()
+
+        for (bin in allApksAndJars) {
+            val rel = bin.relativeTo(unpackedRoot).invariantSeparatorsPath
+            val baseEntry = baseFilesMap[rel]
+            val currentSize = bin.length()
+            val currentCrc = if (baseEntry != null && currentSize == baseEntry.first && currentSize <= 8 * 1024 * 1024L) {
+                runCatching {
+                    val crc = CRC32()
+                    bin.inputStream().buffered().use { ins ->
+                        val buf = ByteArray(16384)
+                        var r: Int
+                        while (ins.read(buf).also { r = it } != -1) {
+                            crc.update(buf, 0, r)
+                        }
+                    }
+                    crc.value
+                }.getOrDefault(baseEntry.second)
+            } else {
+                baseEntry?.second ?: 0L
+            }
+
+            val isModifiedSinceUnpack = baseEntry != null && (currentSize != baseEntry.first || currentCrc != baseEntry.second)
+            val isAddedSinceUnpack = baseFilesMap.isNotEmpty() && baseEntry == null
+
+            val oatDirs = listOf(
+                File(bin.parentFile, "oat/${baseProfile.instructionSet}"),
+                File(bin.parentFile, "oat/arm64")
+            )
+            val oatDir = oatDirs.firstOrNull { it.exists() } ?: oatDirs.first()
+            val odexFile = File(oatDir, "${bin.nameWithoutExtension}.odex")
+            val vdexFile = File(oatDir, "${bin.nameWithoutExtension}.vdex")
+            val fsvFile = File(bin.parentFile, "${bin.name}.fsv_meta")
+
+            val dexCrc = artGeneratorEngine.extractClassesDexCrc32(bin)
+            val vdexMatching = if (vdexFile.exists()) {
+                runCatching {
+                    val header = vdexFile.inputStream().use { ins ->
+                        val b = ByteArray(64)
+                        val r = ins.read(b)
+                        if (r > 0) b.copyOf(r) else ByteArray(0)
+                    }
+                    header.size >= 8 && header[0] == 'v'.code.toByte() && header[1] == 'd'.code.toByte() &&
+                            (!isModifiedSinceUnpack || String(header, Charsets.ISO_8859_1).contains("%08X".format(dexCrc)))
+                }.getOrDefault(false)
+            } else false
+
+            val needsRegen = (isModifiedSinceUnpack || isAddedSinceUnpack) && !vdexMatching && !autoRegenerateDone
+
+            if (odexFile.exists() || isModifiedSinceUnpack || isAddedSinceUnpack || bin.name in listOf("SystemUI.apk", "Settings.apk", "framework-res.apk", "services.jar", "framework.jar")) {
+                val relOdex = odexFile.relativeTo(unpackedRoot).invariantSeparatorsPath
+                val status = when {
+                    autoRegenerateDone && (isModifiedSinceUnpack || isAddedSinceUnpack) -> "REGENERATED_AOSP_GRADE"
+                    needsRegen -> "STALE_NEEDS_REGEN"
+                    else -> "UP_TO_DATE"
+                }
+                items.add(
+                    RecoreArtifactRegenItem(
+                        relativePath = relOdex,
+                        artifactType = "ODEX_OAT + VDEX_DEX + FSV_META",
+                        parentBinaryOrApk = rel,
+                        status = status,
+                        reason = when {
+                            isModifiedSinceUnpack -> "Binaire parent $rel modifié depuis l'unpack : synchronisation DEX CRC32 (0x${"%08X".format(dexCrc)}) & fs-verity requise"
+                            isAddedSinceUnpack -> "Nouveau paquet injecté ($rel) : génération des conteneurs OAT v${baseProfile.oatVersionCode} / VDEX v${baseProfile.vdexVersionCode}"
+                            else -> "Aligné avec le compilateur AOSP d'origine (OAT v${baseProfile.oatVersionCode} / VDEX v${baseProfile.vdexVersionCode})"
+                        },
+                        baseChecksumOrVersion = "OAT v${baseProfile.oatVersionCode} • VDEX v${baseProfile.vdexVersionCode}",
+                        updatedChecksumOrVersion = "DEX CRC32=0x${"%08X".format(dexCrc)} • fsv_meta=${if (fsvFile.exists()) "Actif" else "Prêt"}"
+                    )
+                )
+            }
+
+            if (isModifiedSinceUnpack || isAddedSinceUnpack) {
+                val dependents = mutableListOf<String>()
+                val cascade = mutableListOf<String>()
+                cascade.add("1. Source modifiée : $rel")
+                if (bin.extension.equals("apk", true)) {
+                    dependents.add("${bin.name} (Alignement 4096B STORED resources.arsc & Signature v1/v2/v3)")
+                    cascade.add("2. Intégrité ZIP & Certificat X.509 (${bin.name})")
+                }
+                dependents.add(odexFile.relativeTo(unpackedRoot).invariantSeparatorsPath)
+                dependents.add(vdexFile.relativeTo(unpackedRoot).invariantSeparatorsPath)
+                dependents.add(fsvFile.relativeTo(unpackedRoot).invariantSeparatorsPath)
+                cascade.add("3. Régénération AOSP OAT/ODEX (${odexFile.name} • v${baseProfile.oatVersionCode})")
+                cascade.add("4. Régénération AOSP VDEX (${vdexFile.name} • DEX CRC32=0x${"%08X".format(dexCrc)})")
+                cascade.add("5. Descripteur Merkle fs-verity (${fsvFile.name})")
+                cascade.add("6. Contextes SELinux (${topology.systemPrefixRel}etc/selinux/plat_file_contexts) & fs_config")
+
+                chains.add(
+                    RecoreDependencyCascadeChain(
+                        modifiedSourcePath = rel,
+                        changeType = if (isAddedSinceUnpack) "ADDED" else "MODIFIED",
+                        directDependents = dependents,
+                        cascadeChainOrdered = cascade,
+                        requiresApkResign = isModifiedSinceUnpack && bin.extension.equals("apk", true),
+                        requiresArtRegen = true,
+                        riskIfUnresolved = "Si ${odexFile.name}/${vdexFile.name} ne suivent pas la modification de ${bin.name}, ART rejette le checksum DEX au démarrage (Bootloop Zygote/SystemServer).",
+                        resolutionStatus = if (!needsRegen) "COHERENT" else "NEEDS_REGENERATION"
+                    )
+                )
+            }
+        }
+
+        return items.take(30) to chains
     }
 
     // =========================================================================

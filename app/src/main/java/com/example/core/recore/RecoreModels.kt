@@ -141,6 +141,27 @@ data class RecoreCAbiFfiDescriptor(
     val protobufWireSizeBytes: Int
 )
 
+data class RecoreArtifactRegenItem(
+    val relativePath: String,
+    val artifactType: String,           // ODEX_OAT, VDEX_DEX, ART_BOOT, FSV_META, MAC_PERMS, OTACERTS
+    val parentBinaryOrApk: String,
+    val status: String,                 // UP_TO_DATE, STALE_NEEDS_REGEN, REGENERATED_AOSP_GRADE
+    val reason: String,
+    val baseChecksumOrVersion: String,
+    val updatedChecksumOrVersion: String
+)
+
+data class RecoreDependencyCascadeChain(
+    val modifiedSourcePath: String,
+    val changeType: String,             // MODIFIED, ADDED, REMOVED
+    val directDependents: List<String>,
+    val cascadeChainOrdered: List<String>,
+    val requiresApkResign: Boolean,
+    val requiresArtRegen: Boolean,
+    val riskIfUnresolved: String,
+    val resolutionStatus: String        // COHERENT, NEEDS_REGENERATION, AUTO_RESOLVED
+)
+
 data class RecoreFullBrainReport(
     val targetImageName: String,
     val targetUnpackedPath: String,
@@ -160,5 +181,8 @@ data class RecoreFullBrainReport(
     val smtSolverResult: RecoreSmtSolverResult,
     val fileWatcherDelta: RecoreFileWatcherDelta,
     val cAbiDescriptor: RecoreCAbiFfiDescriptor,
-    val structuredJsonPreview: String
+    val structuredJsonPreview: String,
+    val artifactRegenItems: List<RecoreArtifactRegenItem> = emptyList(),
+    val dependencyCascadeChains: List<RecoreDependencyCascadeChain> = emptyList(),
+    val staleArtifactsNeedingRegenCount: Int = 0
 )

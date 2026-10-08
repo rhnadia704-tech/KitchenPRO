@@ -70,6 +70,7 @@ fun AutoPorterScreen(
     onInspectGsiMechanism: () -> Unit,
     onScanFodStruct: () -> Unit,
     onFixFodCoherentStock: () -> Unit,
+    onFixFodOverlayOnlyZeroSign: () -> Unit = {},
     onExecuteFullAutoPort: () -> Unit
 ) {
     var showLineageMkPreview by remember { mutableStateOf(false) }
@@ -505,12 +506,13 @@ fun AutoPorterScreen(
                         }
                     }
 
-                    // Two Dedicated Action Buttons requested by user:
+                    // Dedicated FOD Action Buttons:
                     // 1) "Scan FODstruct"
-                    // 2) "Fixer FOD (Stock ROM)"
-                    Row(
+                    // 2) Solution 1: "FOD Fix Pro (In-Place + OAT/VDEX)"
+                    // 3) Solution 2: "FOD Fix Overlay-Only (Sans Re-signer APKs)"
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         FilledTonalButton(
                             onClick = {
@@ -519,27 +521,47 @@ fun AutoPorterScreen(
                             },
                             enabled = !uiState.isBusy,
                             modifier = Modifier
-                                .weight(1f)
+                                .fillMaxWidth()
                                 .testTag("scan_fodstruct_button")
                         ) {
                             Icon(imageVector = Icons.Default.Radar, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Scan FODstruct")
+                            Text("Scan FODstruct (Architecture & Diagnostic)")
                         }
 
-                        Button(
-                            onClick = {
-                                expandFodStructCard = true
-                                onFixFodCoherentStock()
-                            },
-                            enabled = !uiState.isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("fix_fod_stock_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.BuildCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Fixer FOD (Stock)")
+                            Button(
+                                onClick = {
+                                    expandFodStructCard = true
+                                    onFixFodCoherentStock()
+                                },
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("fix_fod_stock_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.BuildCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Solution 1 : FOD Fix Pro (+OAT/VDEX)")
+                            }
+
+                            FilledTonalButton(
+                                onClick = {
+                                    expandFodStructCard = true
+                                    onFixFodOverlayOnlyZeroSign()
+                                },
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("fix_fod_overlay_only_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Solution 2 : Overlay-Only (0 Sign)")
+                            }
                         }
                     }
 

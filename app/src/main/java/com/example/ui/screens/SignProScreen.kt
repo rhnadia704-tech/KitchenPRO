@@ -89,6 +89,8 @@ fun SignProScreen(
     onSignSingleApk: () -> Unit,
     onSignIndividualApkInUnpack: (ApkSignTarget) -> Unit,
     onVerifyApkSignatures: (ApkSignTarget?) -> Unit,
+    onDiscoverMultiKeysAndDeps: () -> Unit = {},
+    onSignAllApksOnly: () -> Unit = {},
     onSignAllInMemory: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
@@ -199,7 +201,7 @@ fun SignProScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
-                            text = "2. Signature Globale, Synchronisation XML & Extraction des Clés (-> KEY/Data)",
+                            text = "2. Cartographie Multi-Clés, Sign All (APKs) vs Sign All Pro (OS + OAT/VDEX/fsv_meta)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -207,16 +209,45 @@ fun SignProScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            OutlinedButton(
+                                onClick = onSignAllApksOnly,
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("sign_all_apks_only_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Sign All (APKs)")
+                            }
+
                             Button(
                                 onClick = { onSignAllInMemory(true) },
                                 enabled = !uiState.isBusy,
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(1.2f)
                                     .testTag("sign_all_in_memory_button")
                             ) {
                                 Icon(imageVector = Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Tout Signer (${uiState.scannedApks.size})")
+                                Text("Sign All Pro (+OAT/VDEX)")
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = onDiscoverMultiKeysAndDeps,
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("discover_multi_keys_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Cartographier Clés")
                             }
 
                             FilledTonalButton(
@@ -229,9 +260,9 @@ fun SignProScreen(
                                     .weight(1f)
                                     .testTag("verify_all_signatures_button")
                             ) {
-                                Icon(imageVector = Icons.Default.VerifiedUser, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(imageVector = Icons.Default.VerifiedUser, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Vérifier Tout (Clés)")
+                                Text("Vérifier Tout")
                             }
 
                             FilledTonalButton(
@@ -239,6 +270,40 @@ fun SignProScreen(
                                 modifier = Modifier.testTag("toggle_mac_xml_button")
                             ) {
                                 Icon(imageVector = Icons.Default.Policy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            }
+                        }
+
+                        uiState.signProDiscoveryReport?.let { disc ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.65f),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "Cartographie Multi-Clés & Interdépendances : ${disc.totalDistinctKeysDiscovered} Clé(s) détectée(s) et enregistrée(s) sur ${disc.totalApksScanned} APKs",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    Text(
+                                        text = "Registre enregistré : ${disc.registeredRegistryPath}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    disc.discoveredCertGroups.forEach { cg ->
+                                        Text(
+                                            text = "• [${cg.certClusterId}] Rôle='${cg.assignedRoleName}' (${cg.signedApksCount} APKs • SHA256=${cg.originalSha256Short}) | Domaine=${cg.seinfoDomain}\n  APKs co-signés : ${cg.signedApkNames.take(6).joinToString(", ")}${if (cg.signedApkNames.size > 6) "..." else ""}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                                        )
+                                    }
+                                }
                             }
                         }
 

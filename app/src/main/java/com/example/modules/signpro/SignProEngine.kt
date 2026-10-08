@@ -3,6 +3,7 @@ package com.example.modules.signpro
 import android.util.Base64
 import com.example.core.img.AospTopologyResolver
 import com.example.data.local.KeyManifestEntity
+import com.example.modules.generator.ArtGeneratorEngine
 import com.example.modules.keymaker.KeyMakerEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,6 +22,38 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+
+data class DiscoveredCertGroup(
+    val certClusterId: String,          // e.g. "CERT_01_platform", "CERT_02_media", "CERT_05_networkstack", etc.
+    val assignedRoleName: String,       // e.g. "platform", "media", "shared", "testkey", "networkstack", "sdk_sandbox", "bluetooth"
+    val originalSha256Full: String,
+    val originalSha256Short: String,
+    val originalPublicKeyHexSample: String,
+    val seinfoDomain: String,
+    val sharedUserIds: List<String>,
+    val signedApksCount: Int,
+    val signedApkNames: List<String>,
+    val dependentFilesToUpdate: List<String> // e.g. plat_mac_permissions.xml, otacerts.zip, .odex/.vdex/.fsv_meta
+)
+
+data class ApkInterdependencyMapItem(
+    val apkName: String,
+    val relativePath: String,
+    val certClusterId: String,
+    val roleName: String,
+    val sharedUserId: String,
+    val coSignedPeers: List<String>,    // Other APKs that MUST share the exact same key
+    val dependentSystemFiles: List<String> // .odex, .vdex, .fsv_meta, mac_permissions.xml, privapp-permissions
+)
+
+data class SignProDiscoveryReport(
+    val targetSystemName: String,
+    val totalApksScanned: Int,
+    val totalDistinctKeysDiscovered: Int,
+    val discoveredCertGroups: List<DiscoveredCertGroup>,
+    val interdependencyItems: List<ApkInterdependencyMapItem>,
+    val registeredRegistryPath: String
+)
 
 data class ApkSignTarget(
     val name: String,
@@ -118,7 +151,8 @@ data class SignatureVerificationReport(
  */
 class SignProEngine(
     private val defaultWorkspaceDir: File,
-    private val keyMakerEngine: KeyMakerEngine
+    private val keyMakerEngine: KeyMakerEngine,
+    private val artGeneratorEngine: ArtGeneratorEngine = ArtGeneratorEngine(defaultWorkspaceDir)
 ) {
 
     private fun resolveDecompiledDir(customDir: File?): File {
@@ -203,9 +237,20 @@ class SignProEngine(
                         .let { String(it, Charsets.ISO_8859_1).lowercase() }
                     val combined = "$ascii $utf16Stripped"
 
+                    if (combined.contains("android.uid.networkstack") || combined.contains("networkstack")) {
+                        return "networkstack"
+                    }
+                    if (combined.contains("android.uid.bluetooth")) {
+                        return "bluetooth"
+                    }
+                    if (combined.contains("android.uid.nfc")) {
+                        return "nfc"
+                    }
+                    if (combined.contains("android.uid.se")) {
+                        return "secure_element"
+                    }
                     if (combined.contains("android.uid.system") ||
                         combined.contains("android.uid.phone") ||
-                        combined.contains("android.uid.nfc") ||
                         combined.contains("shareduserid=\"android.uid.platform\"")
                     ) {
                         return "platform"
@@ -221,13 +266,17 @@ class SignProEngine(
         } catch (_: Exception) {
         }
 
-        // 2. Package & Path heuristic matching AOSP build/make/core/package_internal.mk
+        // 2. Package & Path heuristic matching AOSP build/make/core/package_internal.mk (supports 4, 5, 6, 8+ keys)
         return when {
+            name.contains("networkstack") || name.contains("tethering") || name.contains("captiveportal") -> "networkstack"
+            name.contains("bluetooth") -> "bluetooth"
+            name.contains("nfc") -> "nfc"
+            name.contains("sdksandbox") -> "sdk_sandbox"
             name.contains("systemui") || name.contains("settings") || name.contains("framework") ||
                     name.contains("teleservice") || name.contains("phone") || name.contains("keychain") ||
                     name.contains("certinstaller") || name.contains("permissioncontroller") ||
                     name.contains("shell") || name.contains("inputdevices") || name.contains("fusedlocation") ||
-                    name.contains("externalstorage") || name.contains("bluetooth") -> "platform"
+                    name.contains("externalstorage") -> "platform"
             name.contains("media") || name.contains("download") || name.contains("camera") ||
                     name.contains("gallery") || name.contains("music") -> "media"
             name.contains("contacts") || name.contains("launcher") || name.contains("dialer") -> "shared"
@@ -235,6 +284,242 @@ class SignProEngine(
             pathLower.contains("overlay/") && (name.contains("systemui") || name.contains("framework") || name.contains("settings") || name.contains("telephony")) -> "platform"
             else -> "testkey"
         }
+    }
+
+    /**
+     * Multi-Key Discovery & Interdependency Cartography (`discoverAndRegisterAllKeysInImage`):
+     * - Scans all APKs inside the unpacked `.img` regardless of how many distinct certificates exist (1, 4, 5, 6, 8, or more).
+     * - Groups APKs by their actual cryptographic certificate fingerprint + role (`platform`, `media`, `shared`, `testkey`, `networkstack`, `bluetooth`, `nfc`, `sdk_sandbox`, etc.).
+     * - Maps the complete interdependency graph between APKs (sharedUserId co-signing requirements) and dependent OS files (`.odex`, `.vdex`, `.fsv_meta`, `plat_mac_permissions.xml`, `otacerts.zip`, `privapp-permissions`).
+     * - Saves all discovered keys and their APK mappings into `ROM_FORGE/KEY/Data/discovered_img_keys_<system>.json`.
+     */
+    suspend fun discoverAndRegisterAllKeysInImage(
+        targetDecompiledDir: File? = null,
+        keyDataDir: File = File(defaultWorkspaceDir, "KEY/Data"),
+        onLog: (String) -> Unit
+    ): SignProDiscoveryReport = withContext(Dispatchers.IO) {
+        val rootDir = resolveDecompiledDir(targetDecompiledDir)
+        keyDataDir.mkdirs()
+        val topology = AospTopologyResolver.inspectAndResolve(rootDir, autoHealSarConflicts = false)
+        val targets = scanSystemApks(rootDir)
+
+        onLog("[SIGN-PRO-DISCOVERY] Cartographie multi-clés & interdépendances sur ${rootDir.name} (${targets.size} APKs)...")
+
+        // Group APKs by (detectedRole + certSha256Short) so every distinct certificate in the unpacked .img is captured
+        data class RawApkCertInfo(
+            val target: ApkSignTarget,
+            val fullSha256: String,
+            val pubKeyHexSample: String,
+            val sharedUid: String
+        )
+
+        val inspectedList = targets.map { t ->
+            val file = File(t.absolutePath)
+            var certBytes = ByteArray(0)
+            var sharedUid = when (t.detectedRole) {
+                "platform" -> "android.uid.system"
+                "media" -> "android.uid.media"
+                "shared" -> "android.uid.shared"
+                "networkstack" -> "android.uid.networkstack"
+                "bluetooth" -> "android.uid.bluetooth"
+                "nfc" -> "android.uid.nfc"
+                else -> "standard.app.uid"
+            }
+            try {
+                ZipFile(file).use { zf ->
+                    val certEntry = zf.entries().asSequence().firstOrNull {
+                        val u = it.name.uppercase()
+                        u.startsWith("META-INF/") && (u.endsWith(".RSA") || u.endsWith(".DSA") || u.endsWith(".EC"))
+                    } ?: zf.getEntry("META-INF/MANIFEST.MF")
+                    if (certEntry != null) {
+                        certBytes = zf.getInputStream(certEntry).readBytes()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            if (certBytes.isEmpty()) certBytes = t.name.toByteArray()
+            val shaFull = MessageDigest.getInstance("SHA-256").digest(certBytes).joinToString(":") { "%02X".format(it) }
+            val pubSample = certBytes.take(48).joinToString("") { "%02x".format(it) }
+            RawApkCertInfo(t, shaFull, pubSample, sharedUid)
+        }
+
+        // Group by role name so if an image has 5, 6, or 8 distinct roles/certificates, all are preserved and registered
+        val groupedByCert = inspectedList.groupBy { "${it.target.detectedRole}|${it.target.certSha256Short}" }
+
+        val certGroups = mutableListOf<DiscoveredCertGroup>()
+        val interdependencies = mutableListOf<ApkInterdependencyMapItem>()
+
+        var clusterIdx = 1
+        for ((_, groupItems) in groupedByCert) {
+            val first = groupItems.first()
+            val role = first.target.detectedRole
+            val clusterId = "CERT_%02d_%s".format(clusterIdx++, role.uppercase())
+            val seinfo = when (role) {
+                "platform" -> "platform (system_app / platform_app)"
+                "media" -> "media (mediaprovider)"
+                "shared" -> "shared (shared_relro)"
+                "networkstack" -> "networkstack (network_stack)"
+                "bluetooth" -> "bluetooth (bluetooth)"
+                "nfc" -> "nfc (nfc)"
+                else -> "default (priv_app / untrusted_app)"
+            }
+            val apkNames = groupItems.map { it.target.name }
+            val depFiles = listOf(
+                "${topology.systemPrefixRel}etc/selinux/plat_mac_permissions.xml (<signer signature=\"...\" seinfo=\"$role\">)",
+                "${topology.systemPrefixRel}etc/security/otacerts.zip ($role.x509.pem)",
+                "${topology.systemPrefixRel}etc/permissions/privapp-permissions-platform.xml",
+                "Artefacts ART (.odex / .vdex / .fsv_meta) des ${apkNames.size} APKs du groupe"
+            )
+
+            certGroups.add(
+                DiscoveredCertGroup(
+                    certClusterId = clusterId,
+                    assignedRoleName = role,
+                    originalSha256Full = first.fullSha256,
+                    originalSha256Short = first.target.certSha256Short,
+                    originalPublicKeyHexSample = first.pubKeyHexSample,
+                    seinfoDomain = seinfo,
+                    sharedUserIds = groupItems.map { it.sharedUid }.distinct(),
+                    signedApksCount = apkNames.size,
+                    signedApkNames = apkNames,
+                    dependentFilesToUpdate = depFiles
+                )
+            )
+
+            for (item in groupItems) {
+                val apkFile = File(item.target.absolutePath)
+                val baseName = apkFile.nameWithoutExtension
+                val relDir = apkFile.parentFile?.relativeTo(rootDir)?.invariantSeparatorsPath ?: ""
+                val peers = apkNames.filter { it != item.target.name }.take(8)
+                val sysDeps = listOf(
+                    "$relDir/oat/arm64/$baseName.odex",
+                    "$relDir/oat/arm64/$baseName.vdex",
+                    "$relDir/${apkFile.name}.fsv_meta",
+                    "${topology.systemPrefixRel}etc/selinux/plat_mac_permissions.xml"
+                )
+                interdependencies.add(
+                    ApkInterdependencyMapItem(
+                        apkName = item.target.name,
+                        relativePath = item.target.relativePath,
+                        certClusterId = clusterId,
+                        roleName = role,
+                        sharedUserId = item.sharedUid,
+                        coSignedPeers = peers,
+                        dependentSystemFiles = sysDeps
+                    )
+                )
+            }
+        }
+
+        // Persist the discovered multi-key registry to JSON so all N keys are registered on disk
+        val registryFile = File(keyDataDir, "discovered_img_keys_${rootDir.name}.json")
+        val rootJson = JSONObject().apply {
+            put("system_name", rootDir.name)
+            put("total_apks", targets.size)
+            put("total_distinct_keys_discovered", certGroups.size)
+            put("discovered_keys", JSONArray().apply {
+                certGroups.forEach { cg ->
+                    put(JSONObject().apply {
+                        put("cluster_id", cg.certClusterId)
+                        put("role", cg.assignedRoleName)
+                        put("sha256_full", cg.originalSha256Full)
+                        put("seinfo_domain", cg.seinfoDomain)
+                        put("shared_uids", JSONArray(cg.sharedUserIds))
+                        put("apks_count", cg.signedApksCount)
+                        put("apks", JSONArray(cg.signedApkNames))
+                        put("dependent_system_files", JSONArray(cg.dependentFilesToUpdate))
+                    })
+                }
+            })
+        }
+        registryFile.writeText(rootJson.toString(2))
+
+        onLog("[SIGN-PRO-DISCOVERY] ${certGroups.size} clé(s) distincte(s) détectée(s) et enregistrée(s) dans ${registryFile.name} (${interdependencies.size} interdépendances APK cartographiées).")
+
+        SignProDiscoveryReport(
+            targetSystemName = rootDir.name,
+            totalApksScanned = targets.size,
+            totalDistinctKeysDiscovered = certGroups.size,
+            discoveredCertGroups = certGroups,
+            interdependencyItems = interdependencies,
+            registeredRegistryPath = registryFile.absolutePath
+        )
+    }
+
+    /**
+     * Ensures that for every certificate role discovered inside the unpacked `.img` (even if 5, 6, 8+ distinct roles exist),
+     * a corresponding RSA-2048 key pair exists, dynamically generating any missing role keys via `KeyMakerEngine`.
+     */
+    suspend fun ensureDynamicKeySuiteMatchesDiscoveredRoles(
+        existingKeys: List<KeyManifestEntity>,
+        targetDecompiledDir: File? = null,
+        onLog: (String) -> Unit
+    ): List<KeyManifestEntity> = withContext(Dispatchers.IO) {
+        val discovery = discoverAndRegisterAllKeysInImage(targetDecompiledDir, onLog = onLog)
+        val requiredRoles = (discovery.discoveredCertGroups.map { it.assignedRoleName } +
+                listOf("platform", "media", "shared", "testkey")).distinct()
+
+        val resultKeys = existingKeys.toMutableList()
+        val existingRoleNames = resultKeys.map { it.role }.toMutableSet()
+
+        for (role in requiredRoles) {
+            if (role !in existingRoleNames) {
+                onLog("[SIGN-PRO-KEYGEN] Génération dynamique d'une nouvelle clé RSA-2048 pour le rôle découvert '$role'...")
+                val newKey = keyMakerEngine.generateSingleRoleKey(
+                    role = role,
+                    organization = "LineageOS-Custom-Forge",
+                    onLog = onLog
+                )
+                resultKeys.add(newKey)
+                existingRoleNames.add(role)
+            }
+        }
+        resultKeys
+    }
+
+    /**
+     * Mode 1 — `Sign All (APKs Uniquement)` (`signAllApksOnly`):
+     * - Discovers all certificate clusters in the unpacked `.img` and ensures an RSA-2048 key exists for each role.
+     * - Re-signs all APKs in the unpacked `.img` while strictly respecting co-signing interdependencies (`sharedUserId` & role clusters).
+     * - Does NOT modify `plat_mac_permissions.xml`, `.odex`, `.vdex`, `.oat`, or `build.prop` (pure APK batch resigning).
+     */
+    suspend fun signAllApksOnly(
+        keys: List<KeyManifestEntity>,
+        targetDecompiledDir: File? = null,
+        onLog: (String) -> Unit
+    ): BatchSignResult = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val rootDir = resolveDecompiledDir(targetDecompiledDir)
+        val completeKeys = ensureDynamicKeySuiteMatchesDiscoveredRoles(keys, rootDir, onLog)
+        val keyMap = completeKeys.associateBy { it.role }
+        val targets = scanSystemApks(rootDir)
+
+        onLog("[SIGN-ALL-APKS] Mode 'Sign All' (Signature pure des ${targets.size} APKs avec ${completeKeys.size} clés de rôle sans toucher aux fichiers système/ART)...")
+
+        var successCount = 0
+        var bytesProcessed = 0L
+        for (target in targets) {
+            val apkFile = File(target.absolutePath)
+            val keyEntity = keyMap[target.detectedRole] ?: keyMap["platform"] ?: completeKeys.first()
+            if (signApkFileSafelyInPlace(apkFile, keyEntity)) {
+                bytesProcessed += apkFile.length()
+                successCount++
+            }
+        }
+
+        val elapsed = System.currentTimeMillis() - start
+        onLog("[SIGN-ALL-APKS] $successCount/${targets.size} APKs re-signés en ${elapsed}ms (${completeKeys.size} clés utilisées).")
+
+        BatchSignResult(
+            targetDescription = "UNPACK/${rootDir.name} (Sign All APKs Only)",
+            totalApks = targets.size,
+            signedSuccess = successCount,
+            totalBytesProcessed = bytesProcessed,
+            elapsedMs = elapsed,
+            macPermissionsUpdated = false,
+            outputDirectoryPath = rootDir.absolutePath,
+            recoreSignReport = null
+        )
     }
 
     /**
@@ -344,13 +629,14 @@ class SignProEngine(
         var successCount = 0
         var bytesProcessed = 0L
 
-        val keyMap = keys.associateBy { it.role }
+        val completeKeys = ensureDynamicKeySuiteMatchesDiscoveredRoles(keys, rootDir, onLog)
+        val keyMap = completeKeys.associateBy { it.role }
         if (keyMap.isEmpty()) {
             onLog("[SIGN-PRO] ERREUR : Aucune clé disponible dans KEY. Générez d'abord les clés dans Key Maker.")
             return@withContext BatchSignResult(rootDir.name, targets.size, 0, 0L, 0L, false, rootDir.absolutePath)
         }
 
-        onLog("[R.E.C.O.R.E-SIGN] Analyse pré-signature de la chaîne de confiance de l'OS entier (${rootDir.name} • ${targets.size} APKs)...")
+        onLog("[SIGN-ALL-PRO] Analyse pré-signature R.E.C.O.R.E de la chaîne de confiance de l'OS entier (${rootDir.name} • ${targets.size} APKs • ${completeKeys.size} clés actives)...")
 
         // Step 1: R.E.C.O.R.E Pre-Sign Risk Detection & sharedUserId Clustering
         val risks = mutableListOf<RecoreSignTrustRiskItem>()
@@ -456,8 +742,8 @@ class SignProEngine(
 
         var macUpdated = false
         if (updateMacPerm) {
-            macUpdated = patchMacPermissionsXml(keys, rootDir, onLog)
-            realignmentSteps.add("Tables SELinux MAC (${topology.systemPrefixRel}etc/selinux/*_mac_permissions.xml) reconstruites avec les clés publiques HEX entières")
+            macUpdated = patchMacPermissionsXml(completeKeys, rootDir, onLog)
+            realignmentSteps.add("Tables SELinux MAC (${topology.systemPrefixRel}etc/selinux/*_mac_permissions.xml) reconstruites avec les ${completeKeys.size} clés publiques HEX entières")
             realignmentSteps.add("Whitelists ${topology.systemPrefixRel}etc/permissions/privapp-permissions-*.xml & hiddenapi-package-whitelist.xml synchronisées")
 
             updateBuildPropTags(rootDir, onLog)
@@ -467,7 +753,7 @@ class SignProEngine(
             val securityDir = File(topology.etcDir, "security").apply { mkdirs() }
             val otaZip = File(securityDir, "otacerts.zip")
             ZipOutputStream(otaZip.outputStream()).use { zos ->
-                for (k in keys) {
+                for (k in completeKeys) {
                     val pem = File(k.pemPath)
                     if (pem.exists()) {
                         zos.putNextEntry(ZipEntry("${k.role}.x509.pem"))
@@ -477,7 +763,19 @@ class SignProEngine(
                 }
             }
             AospTopologyResolver.registerInjectedFilesInAllConfigs(rootDir, listOf(otaZip), null)
-            realignmentSteps.add("Magasin de certificats OTA (${topology.systemPrefixRel}etc/security/otacerts.zip) régénéré avec ${keys.size} certificats X.509")
+            realignmentSteps.add("Magasin de certificats OTA (${topology.systemPrefixRel}etc/security/otacerts.zip) régénéré avec ${completeKeys.size} certificats X.509")
+
+            // Regenerate all .odex, .vdex, .oat, .art & .fsv_meta files to match the newly resigned APKs (AOSP Compiler Parity)
+            onLog("[SIGN-ALL-PRO] Régénération AOSP-Grade des artefacts dépendants (.odex, .vdex, .oat, .art, .fsv_meta) après resignature complète...")
+            val artRep = artGeneratorEngine.generateArtOptimizationArtifacts(
+                targetDecompiledDir = rootDir,
+                onlyModifiedOrStale = false,
+                onProgress = { _, _, _ -> },
+                onLog = onLog
+            )
+            realignmentSteps.add(
+                "Artefacts ART & fs-verity (.odex, .vdex, .oat, .art, .fsv_meta) régénérés pour ${artRep.compiledCount} paquets (Format AOSP OAT v${artRep.detectedOatVersion} / VDEX v${artRep.detectedVdexVersion})"
+            )
         }
 
         val recoreSignReport = RecoreSignCoherenceReport(

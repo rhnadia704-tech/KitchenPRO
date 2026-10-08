@@ -76,7 +76,8 @@ fun RecoreScreen(
     onSelectDecompiledImg: (String) -> Unit,
     onPickCustomSafTree: (Uri?) -> Unit,
     onRunRecoreDeepAnalysis: () -> Unit,
-    onRunRecoreAutonomousReconstruction: () -> Unit
+    onRunRecoreAutonomousReconstruction: () -> Unit,
+    onRunRecoreRegenerateArtifacts: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val report = uiState.recoreBrainReport
@@ -179,32 +180,55 @@ fun RecoreScreen(
                     }
 
                     // Primary Action Buttons
-                    Row(
+                    Column(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilledTonalButton(
-                            onClick = onRunRecoreDeepAnalysis,
-                            enabled = !uiState.isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("recore_scan_button")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Radar, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Analyser & Prouver (Z3)")
+                            FilledTonalButton(
+                                onClick = onRunRecoreDeepAnalysis,
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("recore_scan_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.Radar, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Analyser & Prouver (Z3)")
+                            }
+
+                            Button(
+                                onClick = onRunRecoreAutonomousReconstruction,
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("recore_heal_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Auto-Guérison & Shims")
+                            }
                         }
 
-                        Button(
-                            onClick = onRunRecoreAutonomousReconstruction,
+                        FilledTonalButton(
+                            onClick = onRunRecoreRegenerateArtifacts,
                             enabled = !uiState.isBusy,
                             modifier = Modifier
-                                .weight(1f)
-                                .testTag("recore_heal_button")
+                                .fillMaxWidth()
+                                .testTag("recore_regenerate_artifacts_button")
                         ) {
-                            Icon(imageVector = Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(imageVector = Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Auto-Guérison & Shims")
+                            Text(
+                                if (report != null && report.staleArtifactsNeedingRegenCount > 0) {
+                                    "Régénérer (${report.staleArtifactsNeedingRegenCount} Artefacts OAT/VDEX/ODEX/fsv_meta à synchroniser)"
+                                } else {
+                                    "Régénérer Tous les Artefacts AOSP (.odex, .vdex, .oat, .art, .fsv_meta)"
+                                }
+                            )
                         }
                     }
 

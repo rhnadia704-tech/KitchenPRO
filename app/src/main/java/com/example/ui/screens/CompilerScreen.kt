@@ -182,12 +182,12 @@ fun CompilerScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "3. REPACKER UKA (.IMG EXT4 / EROFS + VBMETA) -> ROM_FORGE/PACKED",
+                                text = "3. REPACKER UKA PUR (.IMG FIDÈLE À L'ORIGINAL SANS RE-SIGNER LES APKS) -> ROM_FORGE/PACKED",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Reconstruit 'UNPACK/${uiState.selectedDecompiledImgName}' avec multi-groupes 32768 blocs, bitmaps d'inodes/blocs complets et tables UKA (100% lisible dans ZArchiver / 7-Zip / Linux mount)",
+                                text = "Reconstruit 'UNPACK/${uiState.selectedDecompiledImgName}' fidèlement à l'original (même format EXT4/EROFS, même point de montage, mêmes signatures APK d'origine intactes)",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

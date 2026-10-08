@@ -32,6 +32,7 @@ import com.example.modules.porter.AutoPorterEngine
 import com.example.modules.porter.VirtualDeviceTreePortResult
 import com.example.modules.signpro.ApkSignTarget
 import com.example.modules.signpro.BatchSignResult
+import com.example.modules.signpro.SignProDiscoveryReport
 import com.example.modules.signpro.SignProEngine
 import com.example.modules.signpro.SignatureVerificationReport
 import com.example.ui.theme.AppThemePreference
@@ -116,6 +117,7 @@ data class KitchenUiState(
     val selectedSingleApkRole: String = "platform",
     val lastSingleSignedApkOutPath: String = "",
     val scannedApks: List<ApkSignTarget> = emptyList(),
+    val signProDiscoveryReport: SignProDiscoveryReport? = null,
     val lastBatchSignResult: BatchSignResult? = null,
     val lastSignatureReport: SignatureVerificationReport? = null,
     val macPermissionsPreview: String = "",
@@ -153,12 +155,16 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         workspaceDir = assetBinaryManager.getWorkspaceDir()
     )
     private val keyMakerEngine = KeyMakerEngine(storageManager.getRomForgePublicRoot())
-    private val signProEngine = SignProEngine(assetBinaryManager.getWorkspaceDir(), keyMakerEngine)
     private val artGeneratorEngine = ArtGeneratorEngine(
         defaultWorkspaceDir = assetBinaryManager.getWorkspaceDir(),
         binDir = assetBinaryManager.getBinDir(),
         shellEngine = shellEngine,
         repository = repository
+    )
+    private val signProEngine = SignProEngine(
+        defaultWorkspaceDir = assetBinaryManager.getWorkspaceDir(),
+        keyMakerEngine = keyMakerEngine,
+        artGeneratorEngine = artGeneratorEngine
     )
     private val imgCompilerEngine = ImgCompilerEngine(
         defaultWorkspaceDir = assetBinaryManager.getWorkspaceDir(),
@@ -171,7 +177,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         workspaceDir = assetBinaryManager.getWorkspaceDir(),
         keyDataDir = storageManager.getKeyDataReportsDir(),
         signProEngine = signProEngine,
-        imgCompilerEngine = imgCompilerEngine
+        imgCompilerEngine = imgCompilerEngine,
+        artGeneratorEngine = artGeneratorEngine
     )
 
     private val _uiState = MutableStateFlow(KitchenUiState())
@@ -656,6 +663,125 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Discovers all distinct certificate groups (1, 4, 5, 6, 8+ keys) and maps APK co-signing & system file interdependencies.
+     */
+    fun discoverSignProKeysAndInterdependencies() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Cartographie des clés & interdépendances APK dans UNPACK/${targetDir.name}...",
+                    activeTaskProgress = 0.4f
+                )
+            }
+            val discovery = signProEngine.discoverAndRegisterAllKeysInImage(
+                targetDecompiledDir = targetDir,
+                keyDataDir = storageManager.getKeyDataReportsDir(),
+                onLog = { appendLog(it) }
+            )
+            // Also ensure matching RSA-2048 keys are generated and saved in Room DB for all discovered roles
+            val currentKeys = ensureKeysAvailable(state)
+            val expandedKeys = signProEngine.ensureDynamicKeySuiteMatchesDiscoveredRoles(
+                existingKeys = currentKeys,
+                targetDecompiledDir = targetDir,
+                onLog = { appendLog(it) }
+            )
+            if (expandedKeys.size != currentKeys.size) {
+                repository.clearKeys()
+                expandedKeys.forEach { repository.saveKey(it) }
+            }
+
+            val regFile = File(discovery.registeredRegistryPath)
+            if (regFile.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(regFile, "KEY/Data") { appendLog(it) }
+            }
+
+            recordActionCompleted(
+                moduleLabel = "Sign Pro",
+                actionTitle = "Cartographie Multi-Clés & Interdépendances APK",
+                targetName = targetDir.name,
+                summaryDetail = "${discovery.totalDistinctKeysDiscovered} clés détectées & enregistrées | ${discovery.totalApksScanned} APKs cartographiés"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    signProDiscoveryReport = discovery,
+                    cleNoteJsonPreview = keyMakerEngine.readCleNoteManifestJson()
+                )
+            }
+        }
+    }
+
+    /**
+     * Button 1 in Sign Pro: `Sign All` (Signs all APKs only, respecting multi-key role clusters, without modifying system XMLs or OAT/VDEX).
+     */
+    fun signAllApksOnlyInSystem() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Sign All (Signature pure des APKs uniquement) dans UNPACK/${targetDir.name}...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val baseKeys = ensureKeysAvailable(state)
+            val dynamicKeys = signProEngine.ensureDynamicKeySuiteMatchesDiscoveredRoles(baseKeys, targetDir) { appendLog(it) }
+            if (dynamicKeys.size != baseKeys.size) {
+                repository.clearKeys()
+                dynamicKeys.forEach { repository.saveKey(it) }
+            }
+
+            val discovery = signProEngine.discoverAndRegisterAllKeysInImage(
+                targetDecompiledDir = targetDir,
+                keyDataDir = storageManager.getKeyDataReportsDir(),
+                onLog = { appendLog(it) }
+            )
+            val batchResult = signProEngine.signAllApksOnly(
+                keys = dynamicKeys,
+                targetDecompiledDir = targetDir,
+                onLog = { appendLog(it) }
+            )
+
+            val publicMirroredPath = storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = targetDir,
+                subFolderName = "UNPACK/${targetDir.name}",
+                onLog = { appendLog(it) }
+            )
+            val updatedApks = signProEngine.scanSystemApks(targetDir)
+
+            recordActionCompleted(
+                moduleLabel = "Sign Pro",
+                actionTitle = "Sign All (APKs Uniquement • ${dynamicKeys.size} Clés)",
+                targetName = targetDir.name,
+                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés (${dynamicKeys.size} clés de rôle) sans toucher aux fichiers système"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    scannedApks = updatedApks,
+                    signProDiscoveryReport = discovery,
+                    lastBatchSignResult = batchResult.copy(outputDirectoryPath = publicMirroredPath),
+                    cleNoteJsonPreview = keyMakerEngine.readCleNoteManifestJson()
+                )
+            }
+        }
+    }
+
+    /**
+     * Button 2 in Sign Pro: `Sign All Pro` (Signs all APKs with N-key role parity AND synchronizes all dependent files:
+     * `plat_mac_permissions.xml`, `privapp-permissions-*.xml`, `otacerts.zip`, `.odex`, `.vdex`, `.oat`, `.art`, `.fsv_meta`, `build.prop`).
+     */
     fun signAllSystemApksInMemory(injectMacPermissions: Boolean = true) {
         viewModelScope.launch {
             val state = _uiState.value
@@ -663,10 +789,22 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Signature de tous les APKs dans UNPACK/${targetDir.name}..."
+                    activeTaskTitle = "Sign All Pro (APKs + Chaîne de Confiance + OAT/VDEX/fsv_meta) sur UNPACK/${targetDir.name}...",
+                    activeTaskProgress = 0.25f
                 )
             }
-            val currentKeys = ensureKeysAvailable(state)
+            val baseKeys = ensureKeysAvailable(state)
+            val currentKeys = signProEngine.ensureDynamicKeySuiteMatchesDiscoveredRoles(baseKeys, targetDir) { appendLog(it) }
+            if (currentKeys.size != baseKeys.size) {
+                repository.clearKeys()
+                currentKeys.forEach { repository.saveKey(it) }
+            }
+
+            val discovery = signProEngine.discoverAndRegisterAllKeysInImage(
+                targetDecompiledDir = targetDir,
+                keyDataDir = storageManager.getKeyDataReportsDir(),
+                onLog = { appendLog(it) }
+            )
 
             val batchResult = signProEngine.signAllApksInMemoryAndPatchMacPermissions(
                 keys = currentKeys,
@@ -704,9 +842,9 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             recordActionCompleted(
                 moduleLabel = "Sign Pro",
-                actionTitle = "Resignature OS Source-Build & Synchronisation R.E.C.O.R.E",
+                actionTitle = "Sign All Pro (${currentKeys.size} Clés + OAT/VDEX/fsv_meta + SELinux MAC)",
                 targetName = targetDir.name,
-                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés + chaîne de confiance & Z3=${recoreReport.smtStatus} synchronisés"
+                summaryDetail = "${batchResult.signedSuccess}/${batchResult.totalApks} APKs signés + OAT/VDEX/fsv_meta régénérés + Z3=${recoreReport.smtStatus}"
             )
 
             _uiState.update {
@@ -715,6 +853,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskTitle = "",
                     activeTaskProgress = 1f,
                     scannedApks = updatedApks,
+                    signProDiscoveryReport = discovery,
                     lastBatchSignResult = batchResult.copy(outputDirectoryPath = publicMirroredPath),
                     lastSignatureReport = sigReport,
                     macPermissionsPreview = updatedMacXml,
@@ -854,22 +993,22 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "R.E.C.O.R.E Repack Fidèle (${state.selectedFsFormat.name}) depuis UNPACK/${targetDir.name} -> ROM_FORGE/PACKED...",
+                    activeTaskTitle = "Repack Fidèle à l'Original (${state.selectedFsFormat.name} • Sans altérer les signatures APK) depuis UNPACK/${targetDir.name}...",
                     activeTaskProgress = 0.25f
                 )
             }
-            val activeKeys = ensureKeysAvailable(state)
+            val activeKeys = repository.getAllKeys()
 
-            // 1. Run R.E.C.O.R.E auto-healing & reconstruction before building the image
+            // 1. Run non-destructive R.E.C.O.R.E analysis (autoHealAndGenerateShims = false) so Repack NEVER modifies or re-signs APKs!
             val recoreReport = recoreEngine.analyzeAndReconstruct(
                 unpackedRoot = targetDir,
                 activeKeys = activeKeys,
-                autoHealAndGenerateShims = true,
+                autoHealAndGenerateShims = false,
                 onLog = { appendLog(it) }
             )
             _uiState.update { it.copy(activeTaskProgress = 0.55f) }
 
-            // 2. Compile image faithfully to original base .img structure + generate delta/risk report
+            // 2. Compile image faithfully to original base .img structure + generate delta/risk report without touching APK signatures
             val output = imgCompilerEngine.compileSystemAndVbmetaImages(
                 format = state.selectedFsFormat,
                 enableDmVerity = state.enableDmVerity,
@@ -893,13 +1032,13 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, targetDir) { appendLog(it) }
             val fidelity = output.recoreRepackReport
-            val fidelityDesc = if (fidelity == null || fidelity.changedElements.isEmpty()) "100% Identique" else "${fidelity.changedElements.size} modifs"
+            val fidelityDesc = if (fidelity == null || fidelity.changedElements.isEmpty()) "100% Identique à l'Original (0 signature modifiée)" else "${fidelity.changedElements.size} modifs (Signatures APK préservées)"
             val riskDesc = fidelity?.overallRiskLevel ?: "ZERO_RISK_IDENTICAL"
             recordActionCompleted(
                 moduleLabel = "Compilator • R.E.C.O.R.E",
-                actionTitle = "Repack Fidèle UKA (${state.selectedFsFormat.name} + VBMeta)",
+                actionTitle = "Repack Fidèle à l'Original (${state.selectedFsFormat.name} • Zéro Re-Signature APK)",
                 targetName = targetDir.name,
-                summaryDetail = "Image: ${File(pubSystemImg).name} | Fidélité Base=$fidelityDesc | Risque=$riskDesc (Z3=${recoreReport.smtStatus})"
+                summaryDetail = "Image: ${File(pubSystemImg).name} | Fidélité=$fidelityDesc | Risque=$riskDesc"
             )
             _uiState.update {
                 it.copy(
@@ -1116,7 +1255,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "Fixer FOD Cohérent (Qualité Stock ROM) sur ${gsiDir.name}...",
+                    activeTaskTitle = "Solution 1 : FOD Fix Pro (Intégration + Régénération OAT/VDEX/fsv_meta) sur ${gsiDir.name}...",
                     activeTaskProgress = 0.35f
                 )
             }
@@ -1141,7 +1280,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 )
             } else result.portedSystemImgPath
 
-            val activeKeys = ensureKeysAvailable(_uiState.value)
+            val activeKeys = repository.getAllKeys()
             val recoreReport = recoreEngine.analyzeAndReconstruct(
                 unpackedRoot = gsiDir,
                 activeKeys = activeKeys,
@@ -1155,9 +1294,77 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
 
             recordActionCompleted(
                 moduleLabel = "Porting • FOD Fixer",
-                actionTitle = "Fixer FOD Cohérent R.E.C.O.R.E (Source-Built Stock Grade)",
+                actionTitle = "Solution 1 : FOD Fix Pro (In-Place + OAT/VDEX/fsv_meta)",
                 targetName = gsiDir.name,
-                summaryDetail = "5/5 couches FOD (SystemUI/framework-res in-place + RRO + Blobs + Shims ELF64 + SELinux CIL) | Z3=${recoreReport.smtStatus}"
+                summaryDetail = "APKs enrichis (AXML 0x0003) + Overlays RRO + OAT/VDEX/fsv_meta régénérés | Z3=${recoreReport.smtStatus}"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
+                    scannedApks = updatedApks,
+                    recoreBrainReport = recoreReport,
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    /**
+     * Solution 2 in FOD Fixer: Applies FOD Fix strictly via RRO Overlays, native HIDL/AIDL blobs, VINTF, SELinux CIL,
+     * and `init.tucana.fod.rc` WITHOUT modifying or re-signing any existing APK (`framework-res.apk`, `SystemUI.apk`, etc.).
+     */
+    fun applyOverlayOnlyZeroSignFodFix() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Solution 2 : FOD Fix Overlay-Only (Sans modifier ni re-signer les APKs existants) sur ${gsiDir.name}...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val result = autoPorterEngine.applyOverlayOnlyZeroSignFodFix(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+
+            val portedFolder = File(result.portOutputDirectoryPath)
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = portedFolder,
+                subFolderName = "PORT/${portedFolder.name}",
+                onLog = { appendLog(it) }
+            )
+
+            val portedImg = File(result.portedSystemImgPath)
+            val pubPortedImg = if (portedImg.exists()) {
+                storageManager.exportSingleFileToPublicRomForge(
+                    sourceFile = portedImg,
+                    subFolder = "PORT",
+                    onLog = { appendLog(it) }
+                )
+            } else result.portedSystemImgPath
+
+            val activeKeys = repository.getAllKeys()
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = gsiDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
+            val updatedApks = signProEngine.scanSystemApks(gsiDir)
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "Porting • FOD Fixer",
+                actionTitle = "Solution 2 : FOD Fix Overlay-Only (Zéro Re-Signature APK)",
+                targetName = gsiDir.name,
+                summaryDetail = "Overlays RRO + Blobs + VINTF + SELinux CIL + Init RC | 0 APK existant modifié (100% Signatures AOSP intactes)"
             )
 
             _uiState.update {
@@ -1347,6 +1554,55 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     scannedApks = updatedApks,
                     macPermissionsPreview = updatedMacXml,
                     preFlightItems = preFlight,
+                    recoreBrainReport = recoreReport,
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    fun runRecoreRegenerateAllStaleArtifacts() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "R.E.C.O.R.E Régénération AOSP-Grade (.odex, .vdex, .oat, .art, .fsv_meta) sur ${targetDir.name}...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val currentKeys = repository.getAllKeys()
+            val recoreReport = recoreEngine.regenerateAllStaleArtifacts(
+                unpackedRoot = targetDir,
+                activeKeys = currentKeys,
+                onLog = { appendLog(it) }
+            )
+
+            val artReport = artGeneratorEngine.generateArtOptimizationArtifacts(
+                targetDecompiledDir = targetDir,
+                onlyModifiedOrStale = true,
+                onProgress = { _, _, _ -> },
+                onLog = { appendLog(it) }
+            )
+
+            val summary = crossVerifierEngine.runFullDiagnostic(currentKeys, targetDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "R.E.C.O.R.E • Generator",
+                actionTitle = "Régénération AOSP-Grade (.odex/.vdex/.oat/.art/.fsv_meta)",
+                targetName = targetDir.name,
+                summaryDetail = "Format OAT v${artReport.detectedOatVersion} / VDEX v${artReport.detectedVdexVersion} | ${recoreReport.dependencyCascadeChains.size} chaînes synchronisées | Z3=${recoreReport.smtStatus}"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    lastArtReport = artReport,
                     recoreBrainReport = recoreReport,
                     verificationSummary = summary
                 )

@@ -507,6 +507,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onSignSingleApk = viewModel::signSingleSelectedApk,
                                     onSignIndividualApkInUnpack = viewModel::signSingleApkInDecompiledSystem,
                                     onVerifyApkSignatures = viewModel::verifyApkSignaturesAndExportReports,
+                                    onDiscoverMultiKeysAndDeps = viewModel::discoverSignProKeysAndInterdependencies,
+                                    onSignAllApksOnly = viewModel::signAllApksOnlyInSystem,
                                     onSignAllInMemory = viewModel::signAllSystemApksInMemory
                                 )
 
@@ -538,6 +540,7 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onInspectGsiMechanism = viewModel::inspectGsiVendorMechanism,
                                     onScanFodStruct = viewModel::scanGsiFodStruct,
                                     onFixFodCoherentStock = viewModel::applyCoherentStockGradeFodFix,
+                                    onFixFodOverlayOnlyZeroSign = viewModel::applyOverlayOnlyZeroSignFodFix,
                                     onExecuteFullAutoPort = viewModel::executeGsiToSystemAutoPort
                                 )
 
@@ -546,7 +549,8 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
                                     onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
                                     onRunRecoreDeepAnalysis = viewModel::runRecoreDeepAnalysis,
-                                    onRunRecoreAutonomousReconstruction = viewModel::runRecoreAutonomousReconstruction
+                                    onRunRecoreAutonomousReconstruction = viewModel::runRecoreAutonomousReconstruction,
+                                    onRunRecoreRegenerateArtifacts = viewModel::runRecoreRegenerateAllStaleArtifacts
                                 )
 
                                 KitchenTab.CONSOLE -> ConsoleHistoryScreen(
