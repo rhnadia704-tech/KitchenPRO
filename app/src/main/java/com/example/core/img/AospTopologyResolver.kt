@@ -14,27 +14,13 @@ import java.io.File
  *      - `/bin` -> `/system/bin`
  *      - `/etc` -> `/system/etc`
  *      - `/lib64` -> `/system/lib64`
- *    - All real system files live inside `unpackedRoot/system/...`:
- *      - Overlays: `system/product/overlay/` (and `system/system_ext/overlay/`)
- *      - Init scripts: `system/etc/init/`
- *      - VINTF manifests: `system/etc/vintf/`
- *      - SELinux policies: `system/etc/selinux/`
- *      - Shared libraries: `system/lib64/`
- *      - Keylayouts: `system/usr/keylayout/`
- *      - Build properties: `system/build.prop` & `system/product/etc/build.prop`
- *    - **CRITICAL**: If a tool blindly writes to `unpackedRoot/product/overlay/` on a SAR image,
- *      it creates a real directory `/product` at the root that shadows or conflicts with the
- *      `/product -> /system/product` symlink, causing Android's `OverlayManagerService` to ignore
- *      the overlays at boot!
+ *      - `/init` -> `/system/bin/init`
+ *    - All real system files and nested symlinks (`/system/bin/sh -> toybox`, `/system/lib64/...`)
+ *      live inside `unpackedRoot/system/...`.
  *
  * 2. **Flat / Legacy Layout**:
  *    - `unpackedRoot/build.prop`, `unpackedRoot/priv-app/`, `unpackedRoot/etc/` are directly at the root,
  *      and `unpackedRoot/system/` does not contain a nested `build.prop`.
- *
- * This resolver inspects `unpackedRoot`, heals any accidental misplaced files in root `product/` or
- * `system_ext/` on SAR images by migrating them into `system/product/` and `system/system_ext/`,
- * restores the canonical `/product -> /system/product` and `/system_ext -> /system/system_ext` symlinks,
- * and returns the exact canonical paths for every partition component.
  */
 data class AospTopologyReport(
     val unpackedRoot: File,
@@ -62,7 +48,8 @@ object AospTopologyResolver {
     /**
      * Detects whether `unpackedRoot` is a SAR (System-As-Root) image or a Flat image,
      * and optionally heals any misplaced root `product/` or `system_ext/` directories
-     * that would break `/product -> /system/product` symlinks on a SAR image.
+     * that would break `/product -> /system/product` symlinks on a SAR image, while
+     * strictly preserving all nested `/system/bin/...` and `/system/lib64/...` symlinks.
      */
     fun inspectAndResolve(
         unpackedRoot: File,
@@ -98,7 +85,6 @@ object AospTopologyResolver {
                     val rootLevelDir = File(unpackedRoot, subName)
                     val canonicalNestedDir = File(nestedSystemDir, subName)
 
-                    // If a real directory exists at unpackedRoot/<subName> AND contains files, migrate them into unpackedRoot/system/<subName>
                     if (rootLevelDir.exists() && rootLevelDir.isDirectory) {
                         val filesInsideRootSub = rootLevelDir.walkTopDown().filter { it.isFile }.toList()
                         if (filesInsideRootSub.isNotEmpty()) {
@@ -120,7 +106,30 @@ object AospTopologyResolver {
                     }
                 }
 
-                // Ensure canonical SAR symlinks are registered in extracted_symlinks.txt
+                // Heal any symlinks whose `system/` prefix was stripped by an earlier session on a SAR image
+                // (e.g. `bin/cat -> toybox` when `bin` is a root symlink to `/system/bin` and `system/bin` is the real directory)
+                var symlinksUpdated = false
+                val migratedSymlinks = linkedMapOf<String, String>()
+                val rootSarSymlinkNames = setOf("product", "system_ext", "bin", "etc", "lib64", "lib", "init", "odm", "vendor", "sdcard", "bugreports", "d")
+                for ((linkRel, target) in symlinks) {
+                    val firstSeg = linkRel.substringBefore("/")
+                    val isSubPathUnderRootSymlink = linkRel.contains("/") &&
+                            firstSeg in setOf("bin", "etc", "lib", "lib64", "product", "system_ext", "usr", "framework", "app", "priv-app") &&
+                            !File(unpackedRoot, firstSeg).isDirectory &&
+                            File(nestedSystemDir, firstSeg).isDirectory
+                    if (isSubPathUnderRootSymlink) {
+                        migratedSymlinks["system/$linkRel"] = target
+                        symlinksUpdated = true
+                    } else {
+                        migratedSymlinks[linkRel] = target
+                    }
+                }
+                if (symlinksUpdated) {
+                    symlinks.clear()
+                    symlinks.putAll(migratedSymlinks)
+                }
+
+                // Ensure canonical root-level SAR symlinks exist
                 val canonicalSarSymlinks = mapOf(
                     "product" to "/system/product",
                     "system_ext" to "/system/system_ext",
@@ -129,13 +138,15 @@ object AospTopologyResolver {
                     "lib64" to "/system/lib64",
                     "init" to "/system/bin/init"
                 )
-                var symlinksUpdated = false
                 for ((linkRel, target) in canonicalSarSymlinks) {
                     if (!symlinks.containsKey(linkRel) && !File(unpackedRoot, linkRel).exists()) {
                         symlinks[linkRel] = target
                         symlinksUpdated = true
                     }
                 }
+                // Ensure `/config` directory exists at SAR root for `mount configfs none /config`
+                File(unpackedRoot, "config").mkdirs()
+
                 if (symlinksUpdated || healedMessages.isNotEmpty()) {
                     saveExtractedSymlinks(unpackedRoot, symlinks)
                 }
@@ -185,11 +196,6 @@ object AospTopologyResolver {
         )
     }
 
-    /**
-     * Resolves a logical system-relative path (e.g., `"product/overlay/TrebleHardwareOverlay.apk"`,
-     * `"etc/init/init.tucana.fod.rc"`, `"lib64/libgf_hal.so"`) to its exact physical `File`
-     * inside `unpackedRoot` according to whether the image is SAR (`system/...`) or Flat (`...`).
-     */
     fun resolveSystemFile(unpackedRoot: File, logicalSystemSubPath: String): File {
         val topology = inspectAndResolve(unpackedRoot, autoHealSarConflicts = false)
         val cleanRel = logicalSystemSubPath.removePrefix("/").removePrefix("system/")
@@ -198,7 +204,7 @@ object AospTopologyResolver {
 
     /**
      * Synchronizes both UKA `config/<partition>_fs_config` + `config/<partition>_file_contexts`
-     * AND `system/etc/selinux/plat_file_contexts` + `system/etc/fs_config` whenever files
+     * AND `system/etc/selinux/plat_file_contexts` + `ROM_FORGE_META/extracted_fs_config.txt` whenever files
      * (like overlays, blobs, init.rc, keylayouts) are added or modified in `unpackedRoot`.
      */
     fun registerInjectedFilesInAllConfigs(
@@ -229,9 +235,9 @@ object AospTopologyResolver {
             var curDirRel = ""
             for (i in 0 until pathSegments.lastIndex) {
                 curDirRel = if (curDirRel.isEmpty()) pathSegments[i] else "$curDirRel/${pathSegments[i]}"
-                val dirMode = if (curDirRel.endsWith("bin")) "0 2000 0755" else "0 0 0755"
+                val dirMode = if (curDirRel.endsWith("bin") || curDirRel.endsWith("bin/hw")) "0 2000 0755" else "0 0 0755"
                 val ukaDirEntry = "system/$curDirRel $dirMode capabilities=0x0"
-                val metaDirEntry = "$curDirRel $dirMode"
+                val metaDirEntry = "$curDirRel $dirMode capabilities=0x0"
                 if (ukaFsLines.none { it.startsWith("system/$curDirRel ") }) ukaFsLines.add(ukaDirEntry)
                 if (metaFsLines.none { it.startsWith("$curDirRel ") }) metaFsLines.add(metaDirEntry)
             }
@@ -252,20 +258,24 @@ object AospTopologyResolver {
             }
 
             val ukaFsEntry = "system/$relToUnpacked $uidGidMode capabilities=0x0"
-            val metaFsEntry = "$relToUnpacked $uidGidMode"
+            val metaFsEntry = "$relToUnpacked $uidGidMode capabilities=0x0"
             if (ukaFsLines.none { it.startsWith("system/$relToUnpacked ") }) ukaFsLines.add(ukaFsEntry)
             if (metaFsLines.none { it.startsWith("$relToUnpacked ") }) metaFsLines.add(metaFsEntry)
 
             val escapedUkaPath = UkaConfigHelper.escapeFileContextPath("/system/$relToUnpacked")
+            val escapedDirectPath = UkaConfigHelper.escapeFileContextPath("/$relToUnpacked")
             val escapedLogicalPath = UkaConfigHelper.escapeFileContextPath("/" + relToUnpacked.removePrefix("system/"))
             if (ukaFcLines.none { it.startsWith("$escapedUkaPath ") }) {
                 ukaFcLines.add("$escapedUkaPath $selinuxCtx")
             }
+            if (escapedDirectPath != escapedUkaPath && ukaFcLines.none { it.startsWith("$escapedDirectPath ") }) {
+                ukaFcLines.add("$escapedDirectPath $selinuxCtx")
+            }
             if (platFcLines.none { it.startsWith("$escapedLogicalPath ") }) {
                 platFcLines.add("$escapedLogicalPath $selinuxCtx")
             }
-            if (topology.isSarLayout && platFcLines.none { it.startsWith("$escapedUkaPath ") }) {
-                platFcLines.add("$escapedUkaPath $selinuxCtx")
+            if (topology.isSarLayout && platFcLines.none { it.startsWith("$escapedDirectPath ") }) {
+                platFcLines.add("$escapedDirectPath $selinuxCtx")
             }
         }
 
@@ -281,14 +291,35 @@ object AospTopologyResolver {
         )
     }
 
+    /**
+     * Reads all extracted symlinks while strictly preserving their exact relative path from `unpackedRoot`
+     * (NEVER stripping `system/` from nested `/system/bin/...` or `/system/lib64/...` symlinks!).
+     */
     private fun readExtractedSymlinks(unpackedRoot: File): Map<String, String> {
-        val map = mutableMapOf<String, String>()
+        val map = linkedMapOf<String, String>()
+        // 1. Read from immutable baseline snapshot if present so original symlinks are 100% preserved
+        val baseSnap = File(unpackedRoot, "ROM_FORGE_META/base_img_snapshot.txt")
+        if (baseSnap.exists()) {
+            baseSnap.useLines { lines ->
+                lines.filter { it.startsWith("SYMLINK|") }.forEach { line ->
+                    val p = line.split("|")
+                    if (p.size >= 3) {
+                        val left = p[1].trim().removePrefix("/")
+                        val right = p[2].trim()
+                        if (left.isNotEmpty() && right.isNotEmpty()) {
+                            map[left] = right
+                        }
+                    }
+                }
+            }
+        }
+        // 2. Read from `ROM_FORGE_META/extracted_symlinks.txt`
         val symFile = File(unpackedRoot, "ROM_FORGE_META/extracted_symlinks.txt")
         if (symFile.exists()) {
             symFile.readLines().forEach { raw ->
                 val line = raw.trim()
                 if (line.contains("->")) {
-                    val left = line.substringBefore("->").trim().removePrefix("/").removePrefix("system/")
+                    val left = line.substringBefore("->").trim().removePrefix("/")
                     val right = line.substringAfter("->").trim()
                     if (left.isNotEmpty() && right.isNotEmpty()) {
                         map[left] = right
@@ -303,7 +334,7 @@ object AospTopologyResolver {
         val metaDir = File(unpackedRoot, "ROM_FORGE_META").apply { mkdirs() }
         val symFile = File(metaDir, "extracted_symlinks.txt")
         val content = symlinks.entries.sortedBy { it.key }.joinToString("\n") { (k, v) ->
-            "/$k -> $v"
+            "/${k.removePrefix("/")} -> $v"
         }
         symFile.writeText(content + "\n")
     }

@@ -519,18 +519,18 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val initialFodDiag = inspectUdfpsFodHardware(stockVendor, gsiSystem, mergedVendorProps)
         val injectedFiles = mutableListOf<File>()
 
-        // 1. Copy all FOD/DisplayFeature/Goodix blobs directly into canonical systemBaseDir (e.g. system/lib64/ on SAR)
+        // 1. Copy all FOD/DisplayFeature/Goodix blobs directly into canonical systemBaseDir (e.g. system/lib64/ on SAR) without overwriting real existing system .so libraries
         val rawBlobs = scanProprietaryBlobs(stockVendor, gsiSystem)
         rawBlobs.forEach { blob ->
             val src = File(stockVendor, blob.relativePath)
             val dst = File(topology.systemBaseDir, blob.relativePath)
             dst.parentFile?.mkdirs()
-            if (src.exists()) {
+            if (src.exists() && (!dst.exists() || (src.length() > 1024L && dst.length() <= 1024L))) {
                 src.copyTo(dst, overwrite = true)
                 injectedFiles.add(dst)
             }
         }
-        onLog("[FOD-PRO 1/6] Blobs HIDL IXiaomiFingerprint 1.0, IGoodixFingerprintDaemon 2.1, libgf_hal.so et IDisplayFeature 1.0 injectés dans ${pfx}lib64/.")
+        onLog("[FOD-PRO 1/6] Blobs HIDL IXiaomiFingerprint 1.0, IGoodixFingerprintDaemon 2.1, libgf_hal.so et IDisplayFeature 1.0 injectés dans ${pfx}lib64/ (librairies système existantes préservées).")
 
         // 2. Patch framework-res.apk & SystemUI.apk safely (valid binary AXML 0x0003 + 4-byte STORED resources.arsc) + RRO Overlays
         val modifiedCoreApks = patchFrameworkAndSystemUiApksInPlaceForFod(topology.systemBaseDir, brand, codename, initialFodDiag, onLog)
@@ -555,7 +555,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
 
         // 3. Inject VINTF Biometrics & DisplayFeature Matrix + SELinux CIL rules into canonical systemBaseDir/etc/
         val vintfFile = transplantVintfAndMediaConfigs(stockVendor, gsiSystem, initialFodDiag, onLog)
-        val cilFile = File(topology.selinuxDir, "plat_pub_versioned.cil")
+        val cilFile = File(topology.selinuxDir, "recore_fod_sepolicy.cil")
         mergeVendorSepolicyCilRules(gsiSystem, codename, onLog)
         injectedFiles.add(vintfFile)
         injectedFiles.add(cilFile)
@@ -652,13 +652,14 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val initialFodDiag = inspectUdfpsFodHardware(stockVendor, gsiSystem, mergedVendorProps)
         val injectedFiles = mutableListOf<File>()
 
-        // 1. Copy proprietary FOD/DisplayFeature/Goodix blobs into canonical system/lib64/
+        // 1. Copy proprietary FOD/DisplayFeature/Goodix blobs into canonical system/lib64/ without overwriting real existing system .so libraries
         val rawBlobs = scanProprietaryBlobs(stockVendor, gsiSystem)
         rawBlobs.forEach { blob ->
             val src = File(stockVendor, blob.relativePath)
             val dst = File(topology.systemBaseDir, blob.relativePath)
             dst.parentFile?.mkdirs()
-            if (src.exists()) {
+            // Never overwrite a real existing library (> 1 KB) in the GSI with a tiny 256-byte stub!
+            if (src.exists() && (!dst.exists() || (src.length() > 1024L && dst.length() <= 1024L))) {
                 src.copyTo(dst, overwrite = true)
                 injectedFiles.add(dst)
             }
@@ -786,11 +787,11 @@ class AutoPorterEngine(private val workspaceDir: File) {
             val src = File(stockVendor, blob.relativePath)
             val dst = File(portTopology.systemBaseDir, blob.relativePath)
             dst.parentFile?.mkdirs()
-            if (src.exists()) {
+            if (src.exists() && (!dst.exists() || (src.length() > 1024L && dst.length() <= 1024L))) {
                 src.copyTo(dst, overwrite = true)
                 injectedPortFiles.add(dst)
             }
-            onLog("[BLOB-COPY] Transplanté vers PORT : ${pfx}${blob.relativePath} [${blob.subsystem}]")
+            onLog("[BLOB-COPY] Synchronisé vers PORT : ${pfx}${blob.relativePath} [${blob.subsystem}]")
             blob.copy(missingInGsi = false, transplanted = true)
         }
 
@@ -1392,25 +1393,30 @@ class AutoPorterEngine(private val workspaceDir: File) {
         }
 
         val etcDir = topology.etcDir.apply { mkdirs() }
-        File(etcDir, "audio_policy_configuration.xml").writeText(
-            """
-            <?xml version="1.0" encoding="UTF-8"?>
-            <audioPolicyConfiguration version="7.0">
-                <globalConfiguration speaker_drc_enabled="true"/>
-                <modules>
-                    <module name="primary" halVersion="3.0">
-                        <attachedDevices>
-                            <item>Earpiece</item>
-                            <item>Speaker</item>
-                            <item>Built-In Mic</item>
-                        </attachedDevices>
-                    </module>
-                </modules>
-            </audioPolicyConfiguration>
-            """.trimIndent()
-        )
+        val audioPolicyFile = File(etcDir, "audio_policy_configuration.xml")
+        // CRITICAL ANTI-BOOTLOOP: Only create a fallback `audio_policy_configuration.xml` if none exists in the GSI!
+        // Never overwrite an existing real GSI `audio_policy_configuration.xml`!
+        if (!audioPolicyFile.exists()) {
+            audioPolicyFile.writeText(
+                """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <audioPolicyConfiguration version="7.0">
+                    <globalConfiguration speaker_drc_enabled="true"/>
+                    <modules>
+                        <module name="primary" halVersion="3.0">
+                            <attachedDevices>
+                                <item>Earpiece</item>
+                                <item>Speaker</item>
+                                <item>Built-In Mic</item>
+                            </attachedDevices>
+                        </module>
+                    </modules>
+                </audioPolicyConfiguration>
+                """.trimIndent()
+            )
+        }
 
-        onLog("[R.E.C.O.R.E-VINTF] Manifeste VINTF (${topology.systemPrefixRel}etc/vintf/manifest.xml + manifest_tucana_fod.xml) intégré nativement comme une compilation depuis les sources.")
+        onLog("[R.E.C.O.R.E-VINTF] Manifeste VINTF (${topology.systemPrefixRel}etc/vintf/manifest.xml + manifest_tucana_fod.xml) intégré nativement sans altérer audio_policy_configuration.xml.")
         return mergedManifest
     }
 
@@ -1421,8 +1427,42 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): Int {
         val topology = AospTopologyResolver.inspectAndResolve(gsiSystem, autoHealSarConflicts = true, onLog = onLog)
         val selinuxDir = topology.selinuxDir.apply { mkdirs() }
-        val cilFile = File(selinuxDir, "plat_pub_versioned.cil")
+        // Write to a dedicated self-contained CIL module (`recore_fod_sepolicy.cil`) with full `(type ...)` declarations
+        // and clean any undeclared types from `plat_pub_versioned.cil` so `first_stage_init` `secilc` compilation NEVER fails!
+        val platPubCil = File(selinuxDir, "plat_pub_versioned.cil")
+        if (platPubCil.exists()) {
+            val cur = platPubCil.readText()
+            if (cur.contains("; R.E.C.O.R.E Source-Built SELinux CIL FOD")) {
+                val cleaned = cur.substringBefore("; R.E.C.O.R.E Source-Built SELinux CIL FOD").trimEnd() + "\n"
+                platPubCil.writeText(cleaned)
+            }
+        }
 
+        val cilFile = File(selinuxDir, "recore_fod_sepolicy.cil")
+        val typeDecls = listOf(
+            "(type hal_fingerprint_default)",
+            "(roletype object_r hal_fingerprint_default)",
+            "(type sysfs_drm_disp_param)",
+            "(roletype object_r sysfs_drm_disp_param)",
+            "(type sysfs_fod)",
+            "(roletype object_r sysfs_fod)",
+            "(type vendor_xiaomi_fingerprint_hwservice)",
+            "(roletype object_r vendor_xiaomi_fingerprint_hwservice)",
+            "(type vendor_goodix_fingerprint_hwservice)",
+            "(roletype object_r vendor_goodix_fingerprint_hwservice)",
+            "(type vendor_displayfeature_hwservice)",
+            "(roletype object_r vendor_displayfeature_hwservice)",
+            "(type hal_audio_default)",
+            "(roletype object_r hal_audio_default)",
+            "(type hal_camera_default)",
+            "(roletype object_r hal_camera_default)",
+            "(type vendor_camera_prop)",
+            "(roletype object_r vendor_camera_prop)",
+            "(type rild)",
+            "(roletype object_r rild)",
+            "(type vendor_radio_prop)",
+            "(roletype object_r vendor_radio_prop)"
+        )
         val cilRules = listOf(
             "(allow system_server hal_fingerprint_default (binder (call transfer)))",
             "(allow hal_fingerprint_default sysfs_drm_disp_param (file (read write open getattr)))",
@@ -1441,18 +1481,13 @@ class AutoPorterEngine(private val workspaceDir: File) {
             "(allow rild vendor_radio_prop (property_service (set)))"
         )
 
-        val existingCil = if (cilFile.exists()) cilFile.readText() else ""
-        if (!existingCil.contains("sysfs_drm_disp_param")) {
-            val merged = buildString {
-                if (existingCil.isNotBlank()) {
-                    appendLine(existingCil.trimEnd())
-                }
-                appendLine("; R.E.C.O.R.E Source-Built SELinux CIL FOD & Hardware Policy for $codename")
-                cilRules.forEach { appendLine(it) }
-            }
-            cilFile.writeText(merged)
+        val merged = buildString {
+            appendLine("; R.E.C.O.R.E Source-Built Self-Contained SELinux CIL FOD & Hardware Policy for $codename")
+            typeDecls.forEach { appendLine(it) }
+            cilRules.forEach { appendLine(it) }
         }
-        onLog("[R.E.C.O.R.E-SEPOLICY] ${cilRules.size} règles SELinux CIL intégrées dans ${topology.systemPrefixRel}etc/selinux/plat_pub_versioned.cil.")
+        cilFile.writeText(merged)
+        onLog("[R.E.C.O.R.E-SEPOLICY] ${cilRules.size} règles SELinux CIL (avec déclarations de types complètes) intégrées dans ${topology.systemPrefixRel}etc/selinux/recore_fod_sepolicy.cil.")
         return cilRules.size
     }
 

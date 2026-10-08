@@ -32,6 +32,7 @@ private data class SparseSegment(
 /**
  * Provides random-access reads over either a Raw image or an Android Sparse image (0xED26FF3A)
  * directly from a FileChannel without requiring a multi-gigabyte temporary unsparse file on disk.
+ * Mirrors `simg2img` + `imgextractor.py` stream behavior from `blackeangel/UKA`.
  */
 class SparseAwareBlockReader(private val channel: FileChannel) {
     val isSparse: Boolean
@@ -47,12 +48,12 @@ class SparseAwareBlockReader(private val channel: FileChannel) {
         val magic = headerBuf.int
         if (magic == -0x12d900c6) { // 0xED26FF3A in signed 32-bit int
             isSparse = true
-            val major = headerBuf.short.toInt() and 0xFFFF
-            val minor = headerBuf.short.toInt() and 0xFFFF
+            headerBuf.short // major
+            headerBuf.short // minor
             val fileHdrSz = headerBuf.short.toInt() and 0xFFFF
             val chunkHdrSz = headerBuf.short.toInt() and 0xFFFF
             val blkSz = headerBuf.int.toLong() and 0xFFFFFFFFL
-            val totalBlks = headerBuf.int.toLong() and 0xFFFFFFFFL
+            headerBuf.int // totalBlks
             val totalChunks = headerBuf.int.toLong() and 0xFFFFFFFFL
 
             var physPos = fileHdrSz.toLong()
@@ -142,6 +143,12 @@ class SparseAwareBlockReader(private val channel: FileChannel) {
             if (seg.physicalFileOffset >= 0L) {
                 val slice = ByteBuffer.wrap(out, outPos, availInSeg)
                 channel.read(slice, seg.physicalFileOffset + offsetInSeg)
+            } else if (seg.fillValue != 0) {
+                // Honour CHUNK_TYPE_FILL non-zero fill values
+                val fillBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(seg.fillValue).array()
+                for (b in 0 until availInSeg) {
+                    out[outPos + b] = fillBytes[((offsetInSeg + b) and 3L).toInt()]
+                }
             }
             curVirt += availInSeg
             outPos += availInSeg
@@ -175,6 +182,11 @@ private data class Ext4ExtentRun(
     val isUninitialized: Boolean
 )
 
+private data class ParsedXattrs(
+    val selinuxContext: String? = null,
+    val capabilitiesHex: String = "0x0"
+)
+
 private data class ParsedInode(
     val inodeNumber: Long,
     val mode: Int,
@@ -183,7 +195,8 @@ private data class ParsedInode(
     val sizeBytes: Long,
     val flags: Int,
     val rawBlockArea: ByteArray,
-    val selinuxContext: String?
+    val selinuxContext: String?,
+    val capabilitiesHex: String
 ) {
     val isDirectory: Boolean get() = (mode and 0xF000) == 0x4000
     val isRegularFile: Boolean get() = (mode and 0xF000) == 0x8000
@@ -193,10 +206,14 @@ private data class ParsedInode(
 }
 
 /**
- * Full Userspace EXT4 (and Sparse-EXT4) Filesystem Unpacker for Android AOSP / GSI `.img` files.
- * Reads the EXT4 Superblock, 32/64-bit Block Group Descriptor Table, Inode Tables, Extent Trees (`0xF30A`),
- * HTree/Linear Directory entries (`ext4_dir_entry_2`), Symlinks, and SELinux Xattrs (`0xEA020000`),
- * writing the complete filesystem tree into `/storage/emulated/0/ROM_FORGE/decompiled_imgs/<name>/`.
+ * Full Userspace EXT4 (and Sparse-EXT4) Filesystem Unpacker for Android AOSP / GSI `.img` files
+ * implementing the complete logic of `blackeangel/UKA` (`imgextractor.py` v5.27):
+ * - Reads EXT4 Superblock (`UUID`, `s_last_mounted`, `s_feature_compat`, `s_feature_incompat`, `s_feature_ro_compat`)
+ * - Checks and records original AVB 2.0 Footer (`AVBf` at EOF - 64) if present on the source image
+ * - Traverses 32/64-bit Block Group Descriptor Table, Inode Tables, Extent Trees (`0xF30A` depth 0..5)
+ * - Parses HTree/Linear Directory entries (`ext4_dir_entry_2`), Symlinks, and both inline + external Xattr blocks (`0xEA020000`):
+ *   - `security.selinux` -> `file_contexts`
+ *   - `security.capability` (20-byte `vfs_cap_data`) -> `capabilities=0x<hex>` in `fs_config`
  */
 class Ext4UserspaceExtractor {
 
@@ -220,6 +237,8 @@ class Ext4UserspaceExtractor {
 
         val inodesCount = sb.getInt(0x00).toLong() and 0xFFFFFFFFL
         val blocksCountLo = sb.getInt(0x04).toLong() and 0xFFFFFFFFL
+        val freeBlocksLo = sb.getInt(0x0C).toLong() and 0xFFFFFFFFL
+        val freeInodes = sb.getInt(0x10).toLong() and 0xFFFFFFFFL
         val logBlockSize = sb.getInt(0x18)
         val blockSize = 1024 shl logBlockSize
         val blocksPerGroup = sb.getInt(0x20).toLong() and 0xFFFFFFFFL
@@ -243,7 +262,9 @@ class Ext4UserspaceExtractor {
         }
 
         val inodeSize = (sb.getShort(0x58).toInt() and 0xFFFF).let { if (it == 0) 128 else it }
+        val featureCompat = sb.getInt(0x5C)
         val featureIncompat = sb.getInt(0x60)
+        val featureRoCompat = sb.getInt(0x64)
         val is64Bit = (featureIncompat and 0x80) != 0
         val blocksCountHi = if (is64Bit) (sb.getInt(0x150).toLong() and 0xFFFFFFFFL) else 0L
         val totalBlocks = (blocksCountHi shl 32) or blocksCountLo
@@ -251,14 +272,46 @@ class Ext4UserspaceExtractor {
         val rawDescSize = sb.getShort(0xFE).toInt() and 0xFFFF
         val groupDescSize = if (is64Bit && rawDescSize >= 64) rawDescSize else 32
 
+        val uuidBytes = ByteArray(16)
+        System.arraycopy(sbBytes, 0x68, uuidBytes, 0, 16)
+        val uuidHex = uuidBytes.joinToString("") { "%02x".format(it) }
+
         val volumeNameBytes = ByteArray(16)
         System.arraycopy(sbBytes, 0x78, volumeNameBytes, 0, 16)
-        val volumeLabel = String(volumeNameBytes, Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
+        val rawVolumeLabel = String(volumeNameBytes, Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
+
+        val lastMountedBytes = ByteArray(64)
+        System.arraycopy(sbBytes, 0x88, lastMountedBytes, 0, 64)
+        val lastMountedPath = String(lastMountedBytes, Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
+
+        val volumeLabel = rawVolumeLabel.removePrefix("/")
+            .ifEmpty { lastMountedPath.removePrefix("/") }
+            .ifEmpty { outputDir.name.lowercase() }
             .ifEmpty { "system" }
+
+        // Inspect last 64 bytes of virtual stream for an original AVB 2.0 Footer ("AVBf")
+        var hasAvbFooter = false
+        var avbOrigSize = 0L
+        var avbVbmetaOff = 0L
+        var avbVbmetaSz = 0L
+        val virtSz = reader.virtualSize()
+        if (virtSz > 4096L) {
+            val tail = reader.readBytesAt(virtSz - 64L, 64)
+            if (tail.size == 64 && tail[0] == 'A'.code.toByte() && tail[1] == 'V'.code.toByte() && tail[2] == 'B'.code.toByte() && tail[3] == 'f'.code.toByte()) {
+                hasAvbFooter = true
+                val tb = ByteBuffer.wrap(tail).order(ByteOrder.BIG_ENDIAN)
+                avbOrigSize = tb.getLong(12)
+                avbVbmetaOff = tb.getLong(20)
+                avbVbmetaSz = tb.getLong(28)
+                // Save original 64-byte AVB footer so UKA can restore it if needed
+                val ukaCfg = File(outputDir, "config").apply { mkdirs() }
+                File(ukaCfg, "${volumeLabel}_avb_footer.bin").writeBytes(tail)
+            }
+        }
 
         val formatName = if (reader.isSparse) "SPARSE_EXT4" else "EXT4_RAW"
         onProgressLog(
-            "[EXT4-ENGINE] Superblock validé : Format=$formatName | Label='$volumeLabel' | Block=${blockSize}B | Inode=${inodeSize}B | Blocs=$totalBlocks | Inodes=$inodesCount"
+            "[UKA-IMGEXTRACTOR] Superblock validé : Format=$formatName | Label='$volumeLabel' | Mount='${lastMountedPath.ifEmpty { "/" }}' | Block=${blockSize}B | Inode=${inodeSize}B | Blocs=$totalBlocks | Inodes=$inodesCount | AVB=$hasAvbFooter"
         )
 
         val gdtBaseOffset = if (blockSize == 1024) 2048L else blockSize.toLong()
@@ -305,33 +358,37 @@ class Ext4UserspaceExtractor {
             val blockArea = ByteArray(60)
             System.arraycopy(rawInode, 0x28, blockArea, 0, 60)
 
-            // Parse inline or external SELinux xattr if present
+            // Parse inline and external xattrs (both `security.selinux` and `security.capability`)
             var selinuxCtx: String? = null
+            var capHex = "0x0"
+
             if (inodeSize > 128) {
                 val extraIsize = ib.getShort(0x80).toInt() and 0xFFFF
                 val inlineXattrOffset = 128 + extraIsize
                 if (inlineXattrOffset + 4 < inodeSize) {
                     val xattrMagic = ib.getInt(inlineXattrOffset)
                     if (xattrMagic == EXT4_XATTR_MAGIC) {
-                        selinuxCtx = parseSelinuxFromXattrArea(
+                        val inlineParsed = parseXattrsFromArea(
                             rawInode,
                             inlineXattrOffset + 4,
                             inlineXattrOffset + 4,
                             inodeSize - (inlineXattrOffset + 4)
                         )
+                        if (inlineParsed.selinuxContext != null) selinuxCtx = inlineParsed.selinuxContext
+                        if (inlineParsed.capabilitiesHex != "0x0") capHex = inlineParsed.capabilitiesHex
                     }
                 }
             }
-            if (selinuxCtx == null) {
-                val aclLo = ib.getInt(0x68).toLong() and 0xFFFFFFFFL
-                val aclHi = if (inodeSize > 0x76) (ib.getShort(0x74).toLong() and 0xFFFFL) else 0L
-                val xattrBlock = (aclHi shl 32) or aclLo
-                if (xattrBlock > 0L) {
-                    val xblk = reader.readBytesAt(xattrBlock * blockSize, blockSize)
-                    val xb = ByteBuffer.wrap(xblk).order(ByteOrder.LITTLE_ENDIAN)
-                    if (xb.getInt(0) == EXT4_XATTR_MAGIC) {
-                        selinuxCtx = parseSelinuxFromXattrArea(xblk, 32, 0, blockSize)
-                    }
+            val aclLo = ib.getInt(0x68).toLong() and 0xFFFFFFFFL
+            val aclHi = if (inodeSize > 0x76) (ib.getShort(0x74).toLong() and 0xFFFFL) else 0L
+            val xattrBlock = (aclHi shl 32) or aclLo
+            if (xattrBlock > 0L && (selinuxCtx == null || capHex == "0x0")) {
+                val xblk = reader.readBytesAt(xattrBlock * blockSize, blockSize)
+                val xb = ByteBuffer.wrap(xblk).order(ByteOrder.LITTLE_ENDIAN)
+                if (xb.getInt(0) == EXT4_XATTR_MAGIC) {
+                    val extParsed = parseXattrsFromArea(xblk, 32, 0, blockSize)
+                    if (selinuxCtx == null && extParsed.selinuxContext != null) selinuxCtx = extParsed.selinuxContext
+                    if (capHex == "0x0" && extParsed.capabilitiesHex != "0x0") capHex = extParsed.capabilitiesHex
                 }
             }
 
@@ -343,7 +400,8 @@ class Ext4UserspaceExtractor {
                 sizeBytes = fullSize,
                 flags = flags,
                 rawBlockArea = blockArea,
-                selinuxContext = selinuxCtx
+                selinuxContext = selinuxCtx,
+                capabilitiesHex = capHex
             )
         }
 
@@ -391,7 +449,6 @@ class Ext4UserspaceExtractor {
             if (inode.usesExtents) {
                 return collectExtentRunsFromHeader(inode.rawBlockArea).sortedBy { it.logicalBlock }
             }
-            // Direct blocks 0..11 + Single/Double Indirect blocks (12, 13) for non-extent inodes
             val bb = ByteBuffer.wrap(inode.rawBlockArea).order(ByteOrder.LITTLE_ENDIAN)
             val runs = mutableListOf<Ext4ExtentRun>()
             var logicalCursor = 0L
@@ -405,7 +462,6 @@ class Ext4UserspaceExtractor {
             }
 
             val pointersPerBlock = blockSize / 4
-            // Single indirect block (index 12)
             val singleIndBlk = bb.getInt(12 * 4).toLong() and 0xFFFFFFFFL
             if (singleIndBlk > 0L) {
                 val indBytes = reader.readBytesAt(singleIndBlk * blockSize, blockSize)
@@ -419,7 +475,6 @@ class Ext4UserspaceExtractor {
                 }
             }
 
-            // Double indirect block (index 13)
             val doubleIndBlk = bb.getInt(13 * 4).toLong() and 0xFFFFFFFFL
             if (doubleIndBlk > 0L) {
                 val dIndBytes = reader.readBytesAt(doubleIndBlk * blockSize, blockSize)
@@ -489,7 +544,6 @@ class Ext4UserspaceExtractor {
                     val runStartByte = run.logicalBlock * blockSize
                     if (runStartByte >= totalSize) break
 
-                    // Fill any sparse hole between previous extent and this extent
                     if (runStartByte > writtenUpTo) {
                         var holeRemaining = (runStartByte - writtenUpTo).coerceAtMost(totalSize - writtenUpTo)
                         val zeros = ByteArray(min(holeRemaining, 65536L).toInt())
@@ -524,6 +578,16 @@ class Ext4UserspaceExtractor {
                         }
                     }
                 }
+                // If file ends with a sparse hole after the last extent, zero-extend up to totalSize
+                if (writtenUpTo < totalSize) {
+                    var tailHole = totalSize - writtenUpTo
+                    val zeros = ByteArray(min(tailHole, 65536L).toInt())
+                    while (tailHole > 0) {
+                        val step = min(tailHole, zeros.size.toLong()).toInt()
+                        outChannel.write(ByteBuffer.wrap(zeros, 0, step))
+                        tailHole -= step
+                    }
+                }
             }
             return totalSize
         }
@@ -550,7 +614,7 @@ class Ext4UserspaceExtractor {
 
             val permOctal = "%04o".format(dirInode.mode and 0x0FFF)
             val fsPath = if (relPath.isEmpty()) "/" else relPath
-            fsConfigLines.add("$fsPath ${dirInode.uid} ${dirInode.gid} $permOctal")
+            fsConfigLines.add("$fsPath ${dirInode.uid} ${dirInode.gid} $permOctal capabilities=${dirInode.capabilitiesHex}")
             dirInode.selinuxContext?.let { ctx ->
                 fileContextsLines.add("/$relPath $ctx")
             }
@@ -558,7 +622,6 @@ class Ext4UserspaceExtractor {
             val dirBytes = readInodePayloadToMemory(dirInode, maxBytes = 16 * 1024 * 1024)
             val db = ByteBuffer.wrap(dirBytes).order(ByteOrder.LITTLE_ENDIAN)
 
-            // Parse ext4_dir_entry_2 block by block (supports both linear and HTree dx_root/dx_node blocks)
             var blockOffset = 0
             while (blockOffset < dirBytes.size) {
                 val blockEnd = min(blockOffset + blockSize, dirBytes.size)
@@ -571,10 +634,8 @@ class Ext4UserspaceExtractor {
 
                     if (recLen < 8 || (recLen % 4 != 0) || pos + recLen > blockEnd) break
 
-                    // HTree dx_node / dx_tail pseudo-entry check (inode == 0 && nameLen == 0)
                     if (childInodeNum > 0L && childInodeNum <= inodesCount && nameLen in 1..255 && pos + 8 + nameLen <= blockEnd) {
                         val rawName = String(dirBytes, pos + 8, nameLen, Charsets.UTF_8)
-                        // Ignore non-printable binary HTree hash table buckets
                         val isPrintable = rawName.all { ch -> ch.code in 32..126 || ch.code > 160 }
                         val cleanName = rawName.replace("/", "_").trim('\u0000')
                         if (isPrintable && cleanName.isNotEmpty() && cleanName != "." && cleanName != ".." && cleanName != "lost+found") {
@@ -593,7 +654,7 @@ class Ext4UserspaceExtractor {
                                         bytesExtracted += written
 
                                         val fPerm = "%04o".format(childInode.mode and 0x0FFF)
-                                        fsConfigLines.add("$childRelPath ${childInode.uid} ${childInode.gid} $fPerm")
+                                        fsConfigLines.add("$childRelPath ${childInode.uid} ${childInode.gid} $fPerm capabilities=${childInode.capabilitiesHex}")
                                         childInode.selinuxContext?.let { ctx ->
                                             fileContextsLines.add("/$childRelPath $ctx")
                                         }
@@ -601,7 +662,7 @@ class Ext4UserspaceExtractor {
                                         if (filesExtracted - lastLoggedCount >= 50) {
                                             lastLoggedCount = filesExtracted
                                             onProgressLog(
-                                                "[EXT4-EXTRACT] $filesExtracted fichiers / $dirsExtracted dossiers extraits (${bytesExtracted / (1024 * 1024)} MB) -> $childRelPath"
+                                                "[UKA-EXTRACT] $filesExtracted fichiers / $dirsExtracted dossiers extraits (${bytesExtracted / (1024 * 1024)} MB) -> $childRelPath"
                                             )
                                         }
                                     }
@@ -614,7 +675,10 @@ class Ext4UserspaceExtractor {
                                         val linkTarget = String(targetBytes, Charsets.UTF_8).trimEnd('\u0000')
                                         symlinksExtracted++
                                         symlinksLines.add("/$childRelPath -> $linkTarget")
-                                        fsConfigLines.add("$childRelPath ${childInode.uid} ${childInode.gid} 0777 capabilities=0x0")
+                                        fsConfigLines.add("$childRelPath ${childInode.uid} ${childInode.gid} 0777 capabilities=0x0 $linkTarget")
+                                        childInode.selinuxContext?.let { ctx ->
+                                            fileContextsLines.add("/$childRelPath $ctx")
+                                        }
                                     }
                                 }
                             }
@@ -626,11 +690,31 @@ class Ext4UserspaceExtractor {
             }
         }
 
-        // Start recursive extraction from EXT4 Root Inode (Inode 2)
-        onProgressLog("[EXT4-EXTRACT] Lecture de la table d'inodes depuis la racine (Inode #2)...")
+        onProgressLog("[UKA-IMGEXTRACTOR] Lecture de la table d'inodes depuis la racine (Inode #2)...")
         walkDirectory(dirInodeNum = 2L, relPath = "", depth = 0)
 
-        // Save UKA-compatible config/<partition>_fs_config, config/<partition>_file_contexts, config/<partition>_size.txt & ROM_FORGE_META/
+        val sbMeta = UkaSuperblockMetadata(
+            partitionName = volumeLabel,
+            filesystemType = formatName,
+            blockSize = blockSize,
+            inodeSize = inodeSize,
+            totalBlocks = totalBlocks,
+            totalInodes = inodesCount,
+            freeBlocks = freeBlocksLo,
+            freeInodes = freeInodes,
+            blocksPerGroup = blocksPerGroup.toInt().coerceAtLeast(8192),
+            inodesPerGroup = inodesPerGroup.toInt().coerceAtLeast(512),
+            uuidHex = uuidHex,
+            lastMountedPath = lastMountedPath.ifEmpty { "/" },
+            featureCompat = featureCompat,
+            featureIncompat = featureIncompat,
+            featureRoCompat = featureRoCompat,
+            hasAvbFooter = hasAvbFooter,
+            avbOriginalImageSize = avbOrigSize,
+            avbVbmetaOffset = avbVbmetaOff,
+            avbVbmetaSize = avbVbmetaSz
+        )
+
         UkaConfigHelper.writeUkaAndRomForgeConfigs(
             outputDir = outputDir,
             partitionName = volumeLabel,
@@ -639,11 +723,12 @@ class Ext4UserspaceExtractor {
             totalSizeBytes = totalBlocks * blockSize,
             fsConfigLines = fsConfigLines,
             fileContextsLines = fileContextsLines,
-            symlinksLines = symlinksLines
+            symlinksLines = symlinksLines,
+            superblockMeta = sbMeta
         )
 
         onProgressLog(
-            "[UKA-EXT4-SUCCESS] Décompilation complète terminée : $filesExtracted fichiers, $dirsExtracted dossiers, $symlinksExtracted symlinks (${bytesExtracted / (1024 * 1024)} MB) + config/${volumeLabel}_fs_config & ${volumeLabel}_file_contexts dans ${outputDir.absolutePath}"
+            "[UKA-EXT4-SUCCESS] Décompilation UKA v5.27 terminée : $filesExtracted fichiers, $dirsExtracted dossiers, $symlinksExtracted symlinks (${bytesExtracted / (1024 * 1024)} MB) + config/${volumeLabel}_fs_config & ${volumeLabel}_file_contexts dans ${outputDir.absolutePath}"
         )
 
         Ext4ExtractionResult(
@@ -660,12 +745,18 @@ class Ext4UserspaceExtractor {
         )
     }
 
-    private fun parseSelinuxFromXattrArea(
+    /**
+     * Parses both `security.selinux` and `security.capability` (`vfs_cap_data` 20-byte struct)
+     * from an EXT4 inline or external xattr region (exact `imgextractor.py` xattr parser).
+     */
+    private fun parseXattrsFromArea(
         buffer: ByteArray,
         entriesStartOffset: Int,
         valueBaseOffset: Int,
         maxLength: Int
-    ): String? {
+    ): ParsedXattrs {
+        var selinux: String? = null
+        var capHex = "0x0"
         try {
             val bb = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
             var pos = entriesStartOffset
@@ -681,19 +772,23 @@ class Ext4UserspaceExtractor {
                 if (pos + 16 + nameLen > buffer.size) break
 
                 val attrName = String(buffer, pos + 16, nameLen, Charsets.UTF_8)
+                val absValOffset = valueBaseOffset + valueOff
                 // nameIndex == 6 corresponds to EXT4_XATTR_INDEX_SECURITY ("security.")
                 if ((nameIndex == 6 && attrName == "selinux") || attrName.contains("selinux")) {
-                    val absValOffset = valueBaseOffset + valueOff
                     if (valueSize in 1..256 && absValOffset >= 0 && absValOffset + valueSize <= buffer.size) {
-                        return String(buffer, absValOffset, valueSize, Charsets.UTF_8).trimEnd('\u0000')
+                        selinux = String(buffer, absValOffset, valueSize, Charsets.UTF_8).trimEnd('\u0000')
+                    }
+                } else if ((nameIndex == 6 && attrName == "capability") || attrName.contains("capability")) {
+                    if (valueSize >= 20 && absValOffset >= 0 && absValOffset + valueSize <= buffer.size) {
+                        val capBytes = buffer.copyOfRange(absValOffset, absValOffset + 20)
+                        capHex = UkaConfigHelper.parseVfsCapabilityXattr(capBytes)
                     }
                 }
-                // Advance to next 4-byte aligned entry
                 val entrySize = (16 + nameLen + 3) and -4
                 pos += entrySize
             }
         } catch (_: Exception) {
         }
-        return null
+        return ParsedXattrs(selinuxContext = selinux, capabilitiesHex = capHex)
     }
 }

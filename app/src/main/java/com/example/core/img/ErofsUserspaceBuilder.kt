@@ -11,14 +11,14 @@ import java.util.UUID
 
 /**
  * Pure Kotlin EROFS (Enhanced Read-Only File System, magic `0xE0F5E1E2`) Image Builder
- * inspired by `blackeangel/UKA` (`mkfs.erofs`).
+ * implementing the complete `blackeangel/UKA` (`mkfs.erofs`) specification:
  *
- * Produces a genuine, standard EROFS v1 image with:
  * - EROFS Superblock at byte offset 1024 (`0xE0F5E1E2`, 4096-byte blocks, `meta_blkaddr = 1`)
  * - 32-byte compact inodes (`EROFS_INODE_LAYOUT_COMPACT`, 32-byte NID slots)
  * - Sorted `erofs_dirent` directory blocks (`.`, `..`, and all children sorted lexicographically as required by EROFS binary search)
- * - 4K block-aligned file payloads (`EROFS_INODE_FLAT_PLAIN`)
- * - Full compatibility with `ErofsUserspaceExtractor`, 7-Zip/ZArchiver EROFS parser, and Linux `mount -t erofs`.
+ * - 4K block-aligned file AND symlink payloads (`EROFS_INODE_FLAT_PLAIN`)
+ * - Preserves `/config` as an empty root mountpoint while excluding UKA kitchen metadata files (`config/..._fs_config`, etc.)
+ * - Restores UID/GID/permissions from `ROM_FORGE_META/extracted_fs_config.txt` and `config/<part>_fs_config`.
  */
 class ErofsUserspaceBuilder {
 
@@ -49,6 +49,8 @@ class ErofsUserspaceBuilder {
         var dirPayloadBytes: ByteArray = ByteArray(0)
     )
 
+    private data class FsPermEntry(val uid: Int, val gid: Int, val mode: Int)
+
     suspend fun buildErofsImageFromDirectory(
         sourceDir: File,
         targetImgFile: File,
@@ -58,12 +60,16 @@ class ErofsUserspaceBuilder {
         targetImgFile.parentFile?.mkdirs()
         if (targetImgFile.exists()) targetImgFile.delete()
 
+        val cleanVolume = volumeLabel.trim().lowercase().ifEmpty { "system" }
+
         // Autonomously inspect and heal SAR vs Flat partition topology before building EROFS
         val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = sourceDir,
             autoHealSarConflicts = true,
             onLog = onLog
         )
+
+        val fsPermMap = loadFsPermMap(sourceDir, cleanVolume)
 
         val allNodes = mutableListOf<PlannedErofsNode>()
         val rootNode = PlannedErofsNode(
@@ -80,19 +86,28 @@ class ErofsUserspaceBuilder {
 
         fun scanTree(currentDir: File, parentNode: PlannedErofsNode, relPrefix: String) {
             val files = currentDir.listFiles()
-                ?.filter { !it.name.endsWith(".signing.tmp") && it.name != "ROM_FORGE_META" && it.name != "config" }
+                ?.filter { child ->
+                    !child.name.endsWith(".signing.tmp") &&
+                            child.name != "ROM_FORGE_META" &&
+                            !(relPrefix.isEmpty() && child.name == "lost+found") &&
+                            // Keep `/config` as an empty mountpoint for `mount configfs none /config`,
+                            // while excluding UKA kitchen metadata files inside `/config/`
+                            !(relPrefix == "config" && child.isFile && UkaConfigHelper.isUkaMetadataFileName(child.name))
+                }
                 ?.sortedBy { it.name }
                 ?: emptyList()
 
             for (child in files) {
                 val childRel = if (relPrefix.isEmpty()) child.name else "$relPrefix/${child.name}"
+                val cfg = fsPermMap[childRel]
                 if (child.isDirectory) {
+                    val isBinDir = childRel == "bin" || childRel.endsWith("/bin") || childRel.endsWith("/bin/hw") || childRel.endsWith("/xbin")
                     val dirNode = PlannedErofsNode(
                         relPath = childRel,
                         name = child.name,
-                        mode = 0x41ED,
-                        uid = 0,
-                        gid = 0,
+                        mode = 0x4000 or (cfg?.mode ?: 0x1ED),
+                        uid = cfg?.uid ?: 0,
+                        gid = cfg?.gid ?: (if (isBinDir) 2000 else 0),
                         isDir = true,
                         isSymlink = false
                     )
@@ -100,13 +115,18 @@ class ErofsUserspaceBuilder {
                     allNodes.add(dirNode)
                     scanTree(child, dirNode, childRel)
                 } else {
-                    val isBin = childRel.startsWith("bin/") || childRel.startsWith("system/bin/")
+                    val isBin = childRel.startsWith("bin/") ||
+                            childRel.startsWith("system/bin/") ||
+                            childRel.contains("/bin/") ||
+                            childRel.startsWith("xbin/") ||
+                            childRel == "init"
+                    val defPerm = if (childRel.endsWith("bin/init") || childRel == "init") 0x1E8 else if (isBin) 0x1ED else 0x1A4
                     val node = PlannedErofsNode(
                         relPath = childRel,
                         name = child.name,
-                        mode = 0x8000 or (if (isBin) 0x1ED else 0x1A4),
-                        uid = 0,
-                        gid = if (isBin) 2000 else 0,
+                        mode = 0x8000 or (cfg?.mode ?: defPerm),
+                        uid = cfg?.uid ?: 0,
+                        gid = cfg?.gid ?: (if (isBin) 2000 else 0),
                         isDir = false,
                         isSymlink = false,
                         sourceFile = child,
@@ -117,7 +137,7 @@ class ErofsUserspaceBuilder {
                 }
             }
 
-            // Attach symbolic links belonging to this directory (e.g. /product -> /system/product on SAR images)
+            // Attach symbolic links belonging to this directory
             val dirSymlinks = topology.symlinkMappings.filter { (linkPath, _) ->
                 val parentPath = linkPath.substringBeforeLast("/", "")
                 parentPath == relPrefix && parentNode.children.none { it.name == linkPath.substringAfterLast("/") }
@@ -125,12 +145,13 @@ class ErofsUserspaceBuilder {
             for ((linkRel, linkTarget) in dirSymlinks) {
                 val linkName = linkRel.substringAfterLast("/")
                 if (linkName.isNotEmpty()) {
+                    val cfg = fsPermMap[linkRel]
                     val symNode = PlannedErofsNode(
                         relPath = linkRel,
                         name = linkName,
                         mode = 0xA1FF, // 0120777 symlink
-                        uid = 0,
-                        gid = 0,
+                        uid = cfg?.uid ?: 0,
+                        gid = cfg?.gid ?: 0,
                         isDir = false,
                         isSymlink = true,
                         symlinkTarget = linkTarget,
@@ -200,7 +221,7 @@ class ErofsUserspaceBuilder {
         val totalBlocks = (currentDataBlock + 16).coerceAtLeast(64)
         val totalImageBytes = totalBlocks.toLong() * BLOCK_SIZE
 
-        onLog("[UKA-EROFS-BUILDER] Construction EROFS v1 (0xE0F5E1E2) : ${allNodes.size} inodes, $totalBlocks blocs (${totalImageBytes / 1024} KB)...")
+        onLog("[UKA-MKFS-EROFS] Construction EROFS v1 (0xE0F5E1E2) : ${allNodes.size} inodes, $totalBlocks blocs (${totalImageBytes / 1024} KB)...")
 
         RandomAccessFile(targetImgFile, "rw").use { raf ->
             raf.setLength(totalImageBytes)
@@ -214,25 +235,25 @@ class ErofsUserspaceBuilder {
             sb.put(0x0D, 0.toByte())              // sb_extslots
             sb.putShort(0x0E, rootNode.nid.toShort()) // root_nid = 0
             sb.putLong(0x10, allNodes.size.toLong())  // inos
-            sb.putLong(0x18, System.currentTimeMillis() / 1000L) // build_time
+            sb.putLong(0x18, 1230768000L)         // build_time
             sb.putInt(0x20, 0)                    // build_time_nsec
             sb.putInt(0x24, totalBlocks)          // blocks
             sb.putInt(0x28, META_BLK_ADDR)        // meta_blkaddr = 1
             sb.putInt(0x2C, 0)                    // xattr_blkaddr = 0
 
-            val uuid = UUID.nameUUIDFromBytes(volumeLabel.toByteArray())
+            val uuid = UUID.nameUUIDFromBytes(cleanVolume.toByteArray())
             sb.position(0x30)
             sb.putLong(uuid.mostSignificantBits)
             sb.putLong(uuid.leastSignificantBits)
 
-            val labelBytes = volumeLabel.toByteArray(Charsets.UTF_8).copyOf(16)
+            val labelBytes = cleanVolume.toByteArray(Charsets.UTF_8).copyOf(16)
             sb.position(0x40)
             sb.put(labelBytes)
 
             raf.seek(EROFS_SUPER_OFFSET)
             raf.write(sb.array())
 
-            // Write compact inodes at Block 1 (`META_BLK_ADDR`) and data blocks
+            // Write compact inodes at Block 1 (`META_BLK_ADDR`) and data blocks (including symlink target bytes!)
             val copyBuf = ByteArray(65536)
             for (node in allNodes) {
                 val inodeOffset = (META_BLK_ADDR.toLong() * BLOCK_SIZE) + (node.nid.toLong() * INODE_SLOT_SIZE)
@@ -255,6 +276,11 @@ class ErofsUserspaceBuilder {
                 if (node.isDir && node.dirPayloadBytes.isNotEmpty()) {
                     raf.seek(node.rawBlkAddr.toLong() * BLOCK_SIZE)
                     raf.write(node.dirPayloadBytes)
+                } else if (node.isSymlink && node.blockCount > 0) {
+                    // CRITICAL FIX: Write the symlink target string into its allocated data block!
+                    val symBytes = node.symlinkTarget.toByteArray(Charsets.UTF_8)
+                    raf.seek(node.rawBlkAddr.toLong() * BLOCK_SIZE)
+                    raf.write(symBytes)
                 } else if (!node.isDir && !node.isSymlink && node.blockCount > 0 && node.sourceFile != null) {
                     raf.seek(node.rawBlkAddr.toLong() * BLOCK_SIZE)
                     node.sourceFile.inputStream().use { input ->
@@ -267,8 +293,40 @@ class ErofsUserspaceBuilder {
             }
         }
 
-        onLog("[UKA-EROFS-BUILDER] Image EROFS valide générée : ${targetImgFile.absolutePath} (${targetImgFile.length() / 1024} KB)")
+        onLog("[UKA-MKFS-EROFS] Image EROFS valide générée : ${targetImgFile.absolutePath} (${targetImgFile.length() / 1024} KB)")
         targetImgFile.length()
+    }
+
+    private fun loadFsPermMap(sourceDir: File, partitionName: String): Map<String, FsPermEntry> {
+        val map = mutableMapOf<String, FsPermEntry>()
+        val metaFs = File(sourceDir, "ROM_FORGE_META/extracted_fs_config.txt")
+        if (metaFs.exists()) {
+            metaFs.readLines().forEach { line ->
+                val p = line.trim().split(Regex("\\s+"))
+                if (p.size >= 4) {
+                    val rel = p[0].removePrefix("/")
+                    val uid = p[1].toIntOrNull() ?: 0
+                    val gid = p[2].toIntOrNull() ?: 0
+                    val perm = p[3].toIntOrNull(8) ?: 0x1A4
+                    map[rel] = FsPermEntry(uid, gid, perm)
+                }
+            }
+        }
+        val ukaFs = File(sourceDir, "config/${partitionName}_fs_config")
+        if (ukaFs.exists()) {
+            ukaFs.readLines().forEach { line ->
+                val p = line.trim().split(Regex("\\s+"))
+                if (p.size >= 4) {
+                    val raw = p[0].removePrefix("/")
+                    val rel = if (raw.startsWith("$partitionName/")) raw.removePrefix("$partitionName/") else raw
+                    val uid = p[1].toIntOrNull() ?: 0
+                    val gid = p[2].toIntOrNull() ?: 0
+                    val perm = p[3].toIntOrNull(8) ?: 0x1A4
+                    map.putIfAbsent(rel, FsPermEntry(uid, gid, perm))
+                }
+            }
+        }
+        return map
     }
 
     private fun buildErofsDirectoryBlocks(

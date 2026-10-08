@@ -128,8 +128,8 @@ data class KitchenUiState(
     val lastArtReport: ArtGenerationReport? = null,
     // Compiler state
     val selectedFsFormat: FilesystemFormat = FilesystemFormat.EXT4,
-    val enableDmVerity: Boolean = true,
-    val disableVerityFlagsInVbmeta: Boolean = false,
+    val enableDmVerity: Boolean = false,
+    val disableVerityFlagsInVbmeta: Boolean = true,
     val preFlightItems: List<PreFlightAuditItem> = emptyList(),
     val lastCompilationOutput: CompilationBuildOutput? = null,
     val lastMountedImgReport: ImageInspectionReport? = null,
