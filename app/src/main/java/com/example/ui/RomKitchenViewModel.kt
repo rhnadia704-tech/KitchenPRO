@@ -986,6 +986,59 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun repackSimpleAndIntelligent1To1() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val targetDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Repack Simple & Intelligent 1:1 (100% Identique au GSI de départ • DSU Ready) depuis UNPACK/${targetDir.name}...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val activeKeys = repository.getAllKeys()
+            val output = imgCompilerEngine.repackSimpleAndIntelligent1To1(
+                targetDecompiledDir = targetDir,
+                outputImagesDir = storageManager.getPackedOutputImagesDir(),
+                activeKeys = activeKeys,
+                onLog = { appendLog(it) }
+            )
+
+            val pubSystemImg = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(output.systemImgPath),
+                subFolder = "PACKED",
+                onLog = { appendLog(it) }
+            )
+            val pubVbmetaImg = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(output.vbmetaImgPath),
+                subFolder = "PACKED",
+                onLog = { appendLog(it) }
+            )
+
+            val fidelity = output.recoreRepackReport
+            val modeLabel = if (fidelity?.usedExact1To1Clone == true) "Clone 1:1 Bit-à-Bit / Delta In-Place (DSU Ready)" else "Reconstruction Pure Zéro-Mutation (DSU Ready)"
+            recordActionCompleted(
+                moduleLabel = "Compilator • Repack 1:1",
+                actionTitle = "Repack Simple & Intelligent 1:1 (Identique au .img de départ)",
+                targetName = targetDir.name,
+                summaryDetail = "Image: ${File(pubSystemImg).name} (${output.systemImgSizeBytes / (1024 * 1024)} MB) | Mode=$modeLabel"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    preFlightItems = output.preFlightItems,
+                    lastCompilationOutput = output.copy(
+                        systemImgPath = pubSystemImg,
+                        vbmetaImgPath = pubVbmetaImg
+                    )
+                )
+            }
+        }
+    }
+
     fun compileFullSystemAndVbmeta() {
         viewModelScope.launch {
             val state = _uiState.value
@@ -1091,12 +1144,21 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                             pfd.use { descriptor ->
                                 FileInputStream(descriptor.fileDescriptor).use { fis ->
                                     appendLog("[SAF-DIRECT] Ouverture directe sans copie temporaire : $cleanImgFileName")
-                                    shellEngine.inspectAndExtractChannel(
+                                    val rep = shellEngine.inspectAndExtractChannel(
                                         fileName = cleanImgFileName,
                                         channel = fis.channel,
                                         targetDir = targetExtractDir,
                                         onLog = { appendLog(it) }
                                     )
+                                    // Save exact raw/unsparsed baseline image reference for 100% 1:1 DSU-bootable Repack!
+                                    val baseSourceImg = File(targetExtractDir, "ROM_FORGE_META/base_source.img")
+                                    com.example.core.img.ExactImageCloneEngine.unsparseOrCopyChannelToRawImage(
+                                        sourceChannel = fis.channel,
+                                        destRawImgFile = baseSourceImg,
+                                        onLog = { appendLog(it) }
+                                    )
+                                    com.example.core.img.ExactImageCloneEngine.recordSourceImageReference(targetExtractDir, baseSourceImg)
+                                    rep
                                 }
                             }
                         } else null
@@ -1128,6 +1190,9 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     targetDir = targetExtractDir,
                     onLog = { appendLog(it) }
                 )
+                if (targetImgFile.exists() && targetImgFile.length() > 4096L) {
+                    com.example.core.img.ExactImageCloneEngine.recordSourceImageReference(targetExtractDir, targetImgFile)
+                }
             }
 
             if (report.extractedFilesCount == 0) {

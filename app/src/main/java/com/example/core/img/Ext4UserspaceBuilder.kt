@@ -81,6 +81,7 @@ class Ext4UserspaceBuilder {
         sourceDir: File,
         targetImgFile: File,
         volumeLabel: String = "system",
+        strictlyZeroMutation: Boolean = false,
         onLog: (String) -> Unit
     ): Long = withContext(Dispatchers.IO) {
         targetImgFile.parentFile?.mkdirs()
@@ -88,10 +89,10 @@ class Ext4UserspaceBuilder {
 
         val cleanVolume = volumeLabel.trim().lowercase().ifEmpty { "system" }
 
-        // 0. Autonomously inspect and heal SAR vs Flat partition topology before building EXT4
+        // 0. Inspect SAR vs Flat partition topology (without mutating anything when strictlyZeroMutation = true)
         val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = sourceDir,
-            autoHealSarConflicts = true,
+            autoHealSarConflicts = !strictlyZeroMutation,
             onLog = onLog
         )
 
@@ -112,10 +113,15 @@ class Ext4UserspaceBuilder {
         val effectiveMountPoint = baseMetaMap["MOUNT_POINT"]?.takeIf { it.isNotBlank() }
             ?: if (topology.isSarLayout) "/" else "/$effectiveVolume"
         val origUuidHex = baseMetaMap["UUID"].orEmpty()
-        val origSizeBytes = File(sourceDir, "config/${effectiveVolume}_size.txt")
-            .takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
-            ?: baseMetaMap["ORIGINAL_SIZE_BYTES"]?.toLongOrNull()
-            ?: 0L
+        val origTotalBlocks = baseMetaMap["TOTAL_BLOCKS"]?.toLongOrNull() ?: 0L
+        val origSizeBytes = if (origTotalBlocks > 0L) {
+            origTotalBlocks * BLOCK_SIZE
+        } else {
+            File(sourceDir, "config/${effectiveVolume}_size.txt")
+                .takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull()
+                ?: baseMetaMap["ORIGINAL_SIZE_BYTES"]?.toLongOrNull()
+                ?: 0L
+        }
 
         // 1. Load UKA `config/<part>_fs_config` + `ROM_FORGE_META/extracted_fs_config.txt` + `etc/fs_config`
         val fsConfigMap = loadFsConfigMap(sourceDir, effectiveVolume)
@@ -258,8 +264,10 @@ class Ext4UserspaceBuilder {
 
         scanRecursive(sourceDir, rootInode, "")
 
-        // Synchronize UKA `config/` and `ROM_FORGE_META/` before building so any newly added APK/overlay is registered
-        syncUpdatedUkaConfigFiles(sourceDir, effectiveVolume, allInodes, origSizeBytes)
+        if (!strictlyZeroMutation) {
+            // Synchronize UKA `config/` and `ROM_FORGE_META/` before building so any newly added APK/overlay is registered
+            syncUpdatedUkaConfigFiles(sourceDir, effectiveVolume, allInodes, origSizeBytes)
+        }
 
         // 2. Build directory entry payloads (`ext4_dir_entry_2`) for all directories
         for (node in allInodes) {
@@ -430,7 +438,7 @@ class Ext4UserspaceBuilder {
             sbBuf.putShort(0x5A, 0)                               // s_block_group_nr = 0
             sbBuf.putInt(0x5C, 0x0020)                            // s_feature_compat (EXT_ATTR)
             sbBuf.putInt(0x60, 0x0042)                            // s_feature_incompat (FILETYPE | EXTENTS)
-            sbBuf.putInt(0x64, 0x0003)                            // s_feature_ro_compat (SPARSE_SUPER | LARGE_FILE)
+            sbBuf.putInt(0x64, 0x0002)                            // s_feature_ro_compat (LARGE_FILE = 0x0002, no SPARSE_SUPER mismatch!)
 
             // Restore original UUID if captured at unpack time, otherwise deterministic UUID
             if (origUuidHex.length == 32) {
@@ -910,7 +918,6 @@ class Ext4UserspaceBuilder {
         }
 
         // 3. Also parse UKA 6-column symlink entries from `config/<partition>_fs_config`
-        // (Note: UKA prefixes every entry in `<part>_fs_config` with `<part>/`, so remove ONE leading `<part>/` prefix)
         val ukaFs = File(sourceDir, "config/${partitionName}_fs_config")
         if (ukaFs.exists()) {
             ukaFs.readLines().forEach { line ->

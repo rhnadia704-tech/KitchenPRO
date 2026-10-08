@@ -529,6 +529,7 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onUpdateOptions = viewModel::updateCompilerOptions,
                                     onRunPreFlightAudit = viewModel::runPreFlightAudit,
                                     onCompileImages = viewModel::compileFullSystemAndVbmeta,
+                                    onRepackSimple1To1 = viewModel::repackSimpleAndIntelligent1To1,
                                     onImportImgUri = viewModel::importAndInspectExternalImg
                                 )
 

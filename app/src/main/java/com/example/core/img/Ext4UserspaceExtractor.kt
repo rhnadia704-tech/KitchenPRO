@@ -2,11 +2,13 @@ package com.example.core.img
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
+import java.util.Base64
 import kotlin.math.min
 
 data class Ext4ExtractionResult(
@@ -129,7 +131,6 @@ class SparseAwareBlockReader(private val channel: FileChannel) {
             return out
         }
 
-        // Binary search in sparse segments
         var remaining = length
         var curVirt = virtualOffset
         var outPos = 0
@@ -144,7 +145,6 @@ class SparseAwareBlockReader(private val channel: FileChannel) {
                 val slice = ByteBuffer.wrap(out, outPos, availInSeg)
                 channel.read(slice, seg.physicalFileOffset + offsetInSeg)
             } else if (seg.fillValue != 0) {
-                // Honour CHUNK_TYPE_FILL non-zero fill values
                 val fillBytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(seg.fillValue).array()
                 for (b in 0 until availInSeg) {
                     out[outPos + b] = fillBytes[((offsetInSeg + b) and 3L).toInt()]
@@ -214,6 +214,9 @@ private data class ParsedInode(
  * - Parses HTree/Linear Directory entries (`ext4_dir_entry_2`), Symlinks, and both inline + external Xattr blocks (`0xEA020000`):
  *   - `security.selinux` -> `file_contexts`
  *   - `security.capability` (20-byte `vfs_cap_data`) -> `capabilities=0x<hex>` in `fs_config`
+ * - Records `ROM_FORGE_META/exact_inode_ extents_map.txt` (physical block maps for every extracted file)
+ *   and `ROM_FORGE_META/source_img_ref.txt` so Repack Simple & Intelligent can reconstruct a 100% identical
+ *   DSU-bootable `.img` or perform block-level delta updates!
  */
 class Ext4UserspaceExtractor {
 
@@ -295,6 +298,11 @@ class Ext4UserspaceExtractor {
         var avbVbmetaOff = 0L
         var avbVbmetaSz = 0L
         val virtSz = reader.virtualSize()
+        val ukaCfg = File(outputDir, "config").apply { mkdirs() }
+        val metaDir = File(outputDir, "ROM_FORGE_META").apply { mkdirs() }
+        // Save exact 1024-byte original superblock so Repack can preserve all original superblock fields
+        File(metaDir, "original_superblock.bin").writeBytes(sbBytes)
+
         if (virtSz > 4096L) {
             val tail = reader.readBytesAt(virtSz - 64L, 64)
             if (tail.size == 64 && tail[0] == 'A'.code.toByte() && tail[1] == 'V'.code.toByte() && tail[2] == 'B'.code.toByte() && tail[3] == 'f'.code.toByte()) {
@@ -303,9 +311,13 @@ class Ext4UserspaceExtractor {
                 avbOrigSize = tb.getLong(12)
                 avbVbmetaOff = tb.getLong(20)
                 avbVbmetaSz = tb.getLong(28)
-                // Save original 64-byte AVB footer so UKA can restore it if needed
-                val ukaCfg = File(outputDir, "config").apply { mkdirs() }
                 File(ukaCfg, "${volumeLabel}_avb_footer.bin").writeBytes(tail)
+                // Also save the entire tail region from avbOrigSize to virtSz (Hashtree + VBMeta + AVB Footer) if reasonable
+                val tailRegionLen = (virtSz - avbOrigSize).coerceIn(0L, 64L * 1024 * 1024).toInt()
+                if (tailRegionLen > 64) {
+                    val fullAvbTail = reader.readBytesAt(avbOrigSize, tailRegionLen)
+                    File(ukaCfg, "${volumeLabel}_avb_hashtree_tail.bin").writeBytes(fullAvbTail)
+                }
             }
         }
 
@@ -358,7 +370,6 @@ class Ext4UserspaceExtractor {
             val blockArea = ByteArray(60)
             System.arraycopy(rawInode, 0x28, blockArea, 0, 60)
 
-            // Parse inline and external xattrs (both `security.selinux` and `security.capability`)
             var selinuxCtx: String? = null
             var capHex = "0x0"
 
@@ -522,7 +533,9 @@ class Ext4UserspaceExtractor {
             return out
         }
 
-        fun extractRegularFileToDisk(inode: ParsedInode, destFile: File): Long {
+        val inodeExtentMapLines = mutableListOf<String>()
+
+        fun extractRegularFileToDisk(inode: ParsedInode, destFile: File, relPath: String): Long {
             destFile.parentFile?.mkdirs()
             val totalSize = inode.sizeBytes
             if (totalSize <= 0L) {
@@ -535,6 +548,11 @@ class Ext4UserspaceExtractor {
             }
 
             val runs = resolveDataRuns(inode)
+            if (runs.isNotEmpty()) {
+                val encodedRuns = runs.joinToString(",") { "${it.logicalBlock}:${it.physicalBlock}:${it.blockCount}" }
+                inodeExtentMapLines.add("EXTENT|$relPath|${inode.inodeNumber}|$totalSize|$encodedRuns")
+            }
+
             FileOutputStream(destFile).use { fos ->
                 val outChannel = fos.channel
                 val chunkLimit = 256 * 1024 // 256 KB streaming chunks
@@ -578,7 +596,6 @@ class Ext4UserspaceExtractor {
                         }
                     }
                 }
-                // If file ends with a sparse hole after the last extent, zero-extend up to totalSize
                 if (writtenUpTo < totalSize) {
                     var tailHole = totalSize - writtenUpTo
                     val zeros = ByteArray(min(tailHole, 65536L).toInt())
@@ -649,7 +666,7 @@ class Ext4UserspaceExtractor {
                                     }
                                     childInode.isRegularFile || fileType == 1 -> {
                                         val destFile = File(outputDir, childRelPath)
-                                        val written = extractRegularFileToDisk(childInode, destFile)
+                                        val written = extractRegularFileToDisk(childInode, destFile, childRelPath)
                                         filesExtracted++
                                         bytesExtracted += written
 
@@ -693,6 +710,10 @@ class Ext4UserspaceExtractor {
         onProgressLog("[UKA-IMGEXTRACTOR] Lecture de la table d'inodes depuis la racine (Inode #2)...")
         walkDirectory(dirInodeNum = 2L, relPath = "", depth = 0)
 
+        if (inodeExtentMapLines.isNotEmpty()) {
+            File(metaDir, "exact_inode_extents_map.txt").writeText(inodeExtentMapLines.joinToString("\n") + "\n")
+        }
+
         val sbMeta = UkaSuperblockMetadata(
             partitionName = volumeLabel,
             filesystemType = formatName,
@@ -720,7 +741,7 @@ class Ext4UserspaceExtractor {
             partitionName = volumeLabel,
             filesystemType = formatName,
             blockSize = blockSize,
-            totalSizeBytes = totalBlocks * blockSize,
+            totalSizeBytes = virtSz.coerceAtLeast(totalBlocks * blockSize),
             fsConfigLines = fsConfigLines,
             fileContextsLines = fileContextsLines,
             symlinksLines = symlinksLines,

@@ -51,6 +51,7 @@ fun CompilerScreen(
     onUpdateOptions: (FilesystemFormat, Boolean, Boolean) -> Unit,
     onRunPreFlightAudit: (Boolean) -> Unit,
     onCompileImages: () -> Unit,
+    onRepackSimple1To1: () -> Unit = {},
     onImportImgUri: (Uri?) -> Unit
 ) {
     val safImgPicker = rememberLauncherForActivityResult(
@@ -242,6 +243,44 @@ fun CompilerScreen(
                             },
                             modifier = Modifier.testTag("dmverity_switch")
                         )
+                    }
+
+                    // Dedicated button for 100% Identical 1:1 DSU-bootable Repack
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "NOUVEAU : Repack Simple & Intelligent 1:1 (100% Identique au .IMG de départ • Compatible DSU Sideloader)",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "Reconstruit le .IMG exactement à l'identique du GSI de départ (zéro altération des signatures APK, superblock 100% conforme DSU sans SPARSE_SUPER corrompu, clone 1:1 bit-à-bit si non modifié ou patch physique In-Place des blocs 4K).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Button(
+                                onClick = onRepackSimple1To1,
+                                enabled = !uiState.isBusy,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("repack_simple_1to1_button")
+                            ) {
+                                Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Repack Simple & Intelligent 1:1 (Sortir le .IMG de départ)",
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
                     }
 
                     Row(
