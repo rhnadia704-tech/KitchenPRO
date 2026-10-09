@@ -560,9 +560,15 @@ fun AutoPorterScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Solution 2 : Overlay-Only (0 Sign)")
+                                Text("Solution 2 : Overlay + Repack 1:1")
                             }
                         }
+
+                        Text(
+                            text = "Solution 2 : Ajoute Overlays RRO, Blobs FOD, VINTF, SELinux CIL & init.rc sans modifier ni re-signer les APKs existants, puis compile via le Repack Simple & Intelligent 1:1 pour booter exactement comme l'image de base.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
 
                     if (fod != null) {

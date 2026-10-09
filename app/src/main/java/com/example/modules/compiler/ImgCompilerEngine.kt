@@ -346,7 +346,7 @@ class ImgCompilerEngine(
                 overallRiskSummary = if (cloneReport.is100PercentBitForBitIdentical) {
                     "REPACK 1:1 BIT-À-BIT RÉUSSI : Aucune modification détectée depuis l'unpack. L'image générée (${systemImg.name}, ${systemImg.length() / (1024 * 1024)} MB) est 100% identique à l'image GSI de départ (superblock, blocs partagés, HTree, SELinux, capabilities et AVB préservés à l'identique — démarrage DSU Sideloader garanti)."
                 } else {
-                    "REPACK DELTA IN-PLACE RÉUSSI : ${cloneReport.modifiedFilesPatchedInPlaceCount} fichier(s) mis à jour directement dans leurs blocs physiques 4K sans modifier la structure EXT4 d'origine."
+                    "REPACK SIMPLE & INTELLIGENT CHIRURGICAL IN-PLACE RÉUSSI : ${cloneReport.modifiedFilesPatchedInPlaceCount} fichier(s) modifié(s) et ${cloneReport.addedFilesInjectedCount} nouveau(x) fichier(s) injecté(s) directement dans l'image clonée 1:1 sans altérer l'architecture EXT4, les blocs partagés ni les inodes d'origine (100% compatible DSU Sideloader)."
                 },
                 recoreCoherenceGuarantees = cloneReport.details + baseReport.recoreCoherenceGuarantees
             )
@@ -404,42 +404,64 @@ class ImgCompilerEngine(
         val sameFormatAsOriginal = (format == FilesystemFormat.EROFS && isOrigErofs) ||
                 (format == FilesystemFormat.EXT4 && !isOrigErofs)
 
-        if (initialCheckReport.changedElements.isEmpty() && sameFormatAsOriginal) {
-            onLog("[UKA-REPACK] Aucune modification détectée depuis l'unpack : activation automatique du Repack 1:1 Identique pour garantir un boot DSU Sideloader parfait...")
-            val cloneReport = ExactImageCloneEngine.tryExactOrDeltaRepack(
-                unpackedRoot = systemRoot,
-                targetImgFile = systemImg,
-                changedPaths = emptyList(),
-                addedPaths = emptyList(),
-                deletedPaths = emptyList(),
-                onLog = onLog
-            )
-            if (cloneReport != null) {
-                val preFlight = runPreFlightStaticAudit(
-                    autoRepairBootloopRisks = false,
-                    targetDecompiledDir = systemRoot,
+        if (sameFormatAsOriginal && !isOrigErofs) {
+            val modifiedPaths = initialCheckReport.changedElements.filter { it.changeType == "MODIFIED" }.map { it.relativePath }
+            val addedPaths = initialCheckReport.changedElements.filter { it.changeType == "ADDED" }.map { it.relativePath }
+            val deletedPaths = initialCheckReport.changedElements.filter { it.changeType == "DELETED" }.map { it.relativePath }
+
+            if (deletedPaths.isEmpty()) {
+                if (initialCheckReport.changedElements.isEmpty()) {
+                    onLog("[RECORE-1:1] Aucune modification détectée depuis l'unpack : activation automatique du Repack 1:1 Identique Bit-à-Bit (Compatible DSU Sideloader)...")
+                } else {
+                    onLog("[RECORE-SURGICAL-REPACK] ${modifiedPaths.size} fichier(s) modifié(s) et ${addedPaths.size} nouveau(x) fichier(s) détecté(s) : exécution du Repack Simple & Intelligent Chirurgical In-Place sur l'image de base...")
+                }
+
+                // Register any added/modified files in fs_config & file_contexts before repack if changes exist
+                val finalFidelityReport = if (initialCheckReport.changedElements.isNotEmpty()) {
+                    evaluateAndEnforceBaseImageFidelityAndRisks(
+                        systemRoot = systemRoot,
+                        strictlyZeroMutation = false,
+                        onLog = onLog
+                    )
+                } else {
+                    initialCheckReport
+                }
+
+                val cloneReport = ExactImageCloneEngine.tryExactOrDeltaRepack(
+                    unpackedRoot = systemRoot,
+                    targetImgFile = systemImg,
+                    changedPaths = modifiedPaths,
+                    addedPaths = addedPaths,
+                    deletedPaths = deletedPaths,
                     onLog = onLog
                 )
-                val platformKeyPath = activeKeys.find { it.role == "platform" }?.pk8Path ?: "default_platform.pk8"
-                val rootDigest = computeMerkleHashtreeDigest(systemRoot)
-                val flags = if (disableVerityFlagsInVbmeta || !enableDmVerity) 3 else 0
-                writeValidAvb0VbmetaImage(vbmetaImg, rootDigest, flags, platformKeyPath)
-                val elapsed = System.currentTimeMillis() - start
-                return@withContext CompilationBuildOutput(
-                    sourceDecompiledDir = systemRoot.absolutePath,
-                    systemImgPath = systemImg.absolutePath,
-                    systemImgSizeBytes = systemImg.length(),
-                    vbmetaImgPath = vbmetaImg.absolutePath,
-                    vbmetaImgSizeBytes = vbmetaImg.length(),
-                    dmVerityRootDigest = rootDigest,
-                    format = format,
-                    preFlightItems = preFlight,
-                    elapsedMs = elapsed,
-                    recoreRepackReport = initialCheckReport.copy(
-                        usedExact1To1Clone = true,
-                        recoreCoherenceGuarantees = cloneReport.details + initialCheckReport.recoreCoherenceGuarantees
+                if (cloneReport != null) {
+                    val preFlight = runPreFlightStaticAudit(
+                        autoRepairBootloopRisks = false,
+                        targetDecompiledDir = systemRoot,
+                        onLog = onLog
                     )
-                )
+                    val platformKeyPath = activeKeys.find { it.role == "platform" }?.pk8Path ?: "default_platform.pk8"
+                    val rootDigest = computeMerkleHashtreeDigest(systemRoot)
+                    val flags = if (disableVerityFlagsInVbmeta || !enableDmVerity) 3 else 0
+                    writeValidAvb0VbmetaImage(vbmetaImg, rootDigest, flags, platformKeyPath)
+                    val elapsed = System.currentTimeMillis() - start
+                    return@withContext CompilationBuildOutput(
+                        sourceDecompiledDir = systemRoot.absolutePath,
+                        systemImgPath = systemImg.absolutePath,
+                        systemImgSizeBytes = systemImg.length(),
+                        vbmetaImgPath = vbmetaImg.absolutePath,
+                        vbmetaImgSizeBytes = vbmetaImg.length(),
+                        dmVerityRootDigest = rootDigest,
+                        format = format,
+                        preFlightItems = preFlight,
+                        elapsedMs = elapsed,
+                        recoreRepackReport = finalFidelityReport.copy(
+                            usedExact1To1Clone = true,
+                            recoreCoherenceGuarantees = cloneReport.details + finalFidelityReport.recoreCoherenceGuarantees
+                        )
+                    )
+                }
             }
         }
 

@@ -2,7 +2,9 @@ package com.example.modules.porter
 
 import android.os.Build
 import com.example.core.img.AospTopologyResolver
+import com.example.core.img.ExactImageCloneEngine
 import com.example.core.img.Ext4UserspaceBuilder
+import com.example.core.img.UkaConfigHelper
 import com.example.modules.generator.ArtGeneratorEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -717,7 +719,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val updatedFodStruct = scanFodStructAndBuildActionPlan(gsiSystem, stockVendor) { }.copy(
             stockGradeFixApplied = true,
             stockGradeFixSummary = listOf(
-                "Mode Appliqué : Solution 2 (Overlay-Only Sans Modifier ni Re-signer les APKs Existants — 100% Safe Boot)",
+                "Mode Appliqué : Solution 2 (Overlay-Only Sans Modifier ni Re-signer les APKs Existants + Repack Simple & Intelligent 1:1 — 100% DSU & Hardware Bootable)",
+                "Moteur Repack Simple & Intelligent 1:1 : L'image .img finale (${File(portResult.portedSystemImgPath).name}) est générée par clonage 1:1 de l'image GSI de départ + greffe chirurgicale In-Place des nouveaux fichiers FOD (blocs partagés, HTree, inodes et superblock d'origine 100% préservés).",
                 "Intégrité Signatures AOSP : `framework-res.apk`, `SystemUI.apk` et tous les APKs du GSI conservent leurs signatures v2/v3 et `.odex/.vdex` d'origine.",
                 "Couche 1 & 2 (Overlays RRO Statiques) : `${pfx}product/overlay/TrebleHardwareOverlay.apk` (`[445, 1910, 95]`) & `SystemUIUdfpsTucanaOverlay.apk` (`#00FFAA`, HBM=0).",
                 "Couche 3 (HAL & Blobs) : `IXiaomiFingerprint@1.0`, `IGoodixFingerprintDaemon@2.1`, `IDisplayFeature@1.0` et `libgf_hal.so` dans `${pfx}lib64/`.",
@@ -770,7 +773,19 @@ class AutoPorterEngine(private val workspaceDir: File) {
 
         onLog("[PORT-INIT] Préparation de l'espace de travail dédié : ${portedSystemDir.absolutePath}...")
         if (gsiSource.exists() && gsiSource.absolutePath != portedSystemDir.absolutePath) {
-            gsiSource.copyRecursively(portedSystemDir, overwrite = true)
+            val origRef = ExactImageCloneEngine.resolveCandidateSourceImg(gsiSource)
+            gsiSource.walkTopDown().forEach { srcFile ->
+                if (srcFile.name == "base_source.img") return@forEach
+                val rel = srcFile.relativeTo(gsiSource).path
+                val dstFile = if (rel.isEmpty()) portedSystemDir else File(portedSystemDir, rel)
+                if (srcFile.isDirectory) {
+                    dstFile.mkdirs()
+                } else {
+                    dstFile.parentFile?.mkdirs()
+                    srcFile.copyTo(dstFile, overwrite = true)
+                }
+            }
+            ExactImageCloneEngine.recordSourceImageReference(portedSystemDir, origRef)
         }
 
         val portTopology = AospTopologyResolver.inspectAndResolve(
@@ -838,13 +853,36 @@ class AutoPorterEngine(private val workspaceDir: File) {
 
         val portedImgFile = File(portRoot, "${gsiSource.name}_ported_${codename}.img")
         if (compilePortedImg) {
-            onLog("[PORT-STEP 5/5] Compilation de l'image système portée finale dans PORT/${portedImgFile.name}...")
-            ext4Builder.buildExt4ImageFromDirectory(
-                sourceDir = portedSystemDir,
-                targetImgFile = portedImgFile,
-                volumeLabel = "system",
-                onLog = onLog
-            )
+            onLog("[PORT-STEP 5/5] Compilation de l'image système portée finale via le moteur Repack Simple & Intelligent 1:1 / R.E.C.O.R.E dans PORT/${portedImgFile.name}...")
+
+            // Compute modified and added files relative to base_img_snapshot.txt so ExactImageCloneEngine can surgically patch the 1:1 cloned base .img!
+            val (modRelPaths, addRelPaths, delRelPaths) = computeDeltaPathsAgainstBaseSnapshot(portedSystemDir)
+
+            val cloneDelta = if (delRelPaths.isEmpty()) {
+                ExactImageCloneEngine.tryExactOrDeltaRepack(
+                    unpackedRoot = portedSystemDir,
+                    targetImgFile = portedImgFile,
+                    changedPaths = modRelPaths,
+                    addedPaths = addRelPaths,
+                    deletedPaths = delRelPaths,
+                    onLog = onLog
+                )
+            } else null
+
+            if (cloneDelta != null) {
+                onLog(
+                    "[REPACK-SIMPLE-INTELLIGENT-FOD] Image ${portedImgFile.name} (${portedImgFile.length() / (1024 * 1024)} MB) générée par Repack Simple & Intelligent 1:1 : " +
+                            "${cloneDelta.unmodifiedFilesCount} fichiers d'origine 100% intacts, ${cloneDelta.modifiedFilesPatchedInPlaceCount} patchés In-Place, ${cloneDelta.addedFilesInjectedCount} nouveaux fichiers FOD greffés chirurgicalement (DSU Sideloader Ready) !"
+                )
+            } else {
+                ext4Builder.buildExt4ImageFromDirectory(
+                    sourceDir = portedSystemDir,
+                    targetImgFile = portedImgFile,
+                    volumeLabel = "system",
+                    strictlyZeroMutation = !patchExistingApksInPlace,
+                    onLog = onLog
+                )
+            }
         }
 
         val mechReport = inspectGsiMechanismAndVendorCommunication(portedSystemDir, stockVendor) { }
@@ -1627,6 +1665,90 @@ class AutoPorterEngine(private val workspaceDir: File) {
                 val suffix = if (index == blobs.lastIndex) "" else " \\"
                 appendLine("    vendor/${blob.relativePath}:\$(TARGET_COPY_OUT_SYSTEM)/${blob.relativePath}$suffix")
             }
+        }
+    }
+
+    private fun computeDeltaPathsAgainstBaseSnapshot(systemRoot: File): Triple<List<String>, List<String>, List<String>> {
+        val snapFile = File(systemRoot, "ROM_FORGE_META/base_img_snapshot.txt")
+        if (!snapFile.exists()) return Triple(emptyList(), emptyList(), emptyList())
+
+        data class SnapEntry(val relPath: String, val type: String, val size: Long, val crc: Long)
+        val baseEntries = mutableMapOf<String, SnapEntry>()
+
+        snapFile.useLines { lines ->
+            lines.forEach { raw ->
+                val line = raw.trim()
+                if (line.startsWith("ENTRY|")) {
+                    val p = line.split("|")
+                    if (p.size >= 5) {
+                        val rel = p[1]
+                        baseEntries[rel] = SnapEntry(
+                            relPath = rel,
+                            type = p[2],
+                            size = p[3].toLongOrNull() ?: 0L,
+                            crc = p[4].toLongOrNull() ?: 0L
+                        )
+                    }
+                }
+            }
+        }
+        if (baseEntries.isEmpty()) return Triple(emptyList(), emptyList(), emptyList())
+
+        val currentFilesMap = mutableMapOf<String, File>()
+        systemRoot.walkTopDown()
+            .filter {
+                it != systemRoot &&
+                        !it.invariantSeparatorsPath.contains("/ROM_FORGE_META") &&
+                        !UkaConfigHelper.isUkaMetadataFileName(it.name) &&
+                        it.name != "lost+found" &&
+                        !it.name.endsWith(".tmp")
+            }
+            .forEach { f ->
+                val rel = f.relativeTo(systemRoot).invariantSeparatorsPath
+                currentFilesMap[rel] = f
+            }
+
+        val modified = mutableListOf<String>()
+        val added = mutableListOf<String>()
+        val deleted = mutableListOf<String>()
+
+        for ((rel, curFile) in currentFilesMap) {
+            val base = baseEntries[rel]
+            if (base == null) {
+                if (curFile.isFile) {
+                    added.add(rel)
+                }
+            } else if (curFile.isFile && base.type == "FILE") {
+                val curSize = curFile.length()
+                val curCrc = if (curSize <= 4 * 1024 * 1024) computeFastFileCrc(curFile) else curSize
+                if (curSize != base.size || curCrc != base.crc) {
+                    modified.add(rel)
+                }
+            }
+        }
+
+        for ((rel, base) in baseEntries) {
+            if (base.type == "FILE" && !currentFilesMap.containsKey(rel) && !UkaConfigHelper.isUkaMetadataFileName(rel.substringAfterLast("/"))) {
+                deleted.add(rel)
+            }
+        }
+
+        return Triple(modified, added, deleted)
+    }
+
+    private fun computeFastFileCrc(file: File): Long {
+        val crc = CRC32()
+        val buf = ByteArray(16384)
+        return try {
+            file.inputStream().use { fis ->
+                var r: Int
+                while (fis.read(buf).also { r = it } != -1) {
+                    crc.update(buf, 0, r)
+                }
+            }
+            crc.value
+        } catch (_: Exception) {
+            file.length()
         }
     }
 

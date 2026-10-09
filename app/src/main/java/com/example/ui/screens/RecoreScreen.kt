@@ -209,7 +209,7 @@ fun RecoreScreen(
                             ) {
                                 Icon(imageVector = Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text("Auto-Guérison & Shims")
+                                Text("Reconstruire & Repack 1:1")
                             }
                         }
 
@@ -315,6 +315,135 @@ fun RecoreScreen(
                 // TAB 0: OVERVIEW, SMT Z3 FORMAL SOLVER & INCREMENTAL FILE WATCHER
                 // =========================================================================
                 0 -> {
+                    val bp = report.initialStructureBlueprint
+                    if (bp != null) {
+                        item {
+                            ElevatedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("recore_initial_blueprint_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.AccountTree,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "EMPREINTE STRUCTURE INITIALE & REPACK 1:1 R.E.C.O.R.E",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                                Text(
+                                                    text = bp.repackExecutionMode,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.secondary,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+
+                                        Surface(
+                                            color = if (bp.is100PercentIdenticalToInitial) {
+                                                MaterialTheme.colorScheme.secondaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.tertiaryContainer
+                                            },
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text(
+                                                text = if (bp.is100PercentIdenticalToInitial) "100% IDENTIQUE" else "DELTA CHIRURGICAL",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = if (bp.is100PercentIdenticalToInitial) {
+                                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                                } else {
+                                                    MaterialTheme.colorScheme.onTertiaryContainer
+                                                },
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                                        ) {
+                                            Text(
+                                                text = "• Image de Base   : ${bp.baseImageName} (${bp.baseFilesystemFormat}) • Layout : ${bp.baseArchitectureLayout}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                            Text(
+                                                text = "• Géométrie EXT4  : ${bp.baseTotalBlocks} blocs (${bp.baseBlockSize}B) • ${bp.baseTotalInodes} inodes • Mount='${bp.baseMountPoint}'",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                            Text(
+                                                text = "• UUID & Extents  : ${bp.baseUuidHex} • ${bp.unmodifiedFilesCount} fichiers intacts • ${bp.totalRecordedExtentsCount} extents",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace
+                                            )
+                                            Text(
+                                                text = "• Modifications   : ${bp.modifiedFilesPaths.size} modifié(s) | ${bp.addedFilesPaths.size} nouveau(x) fichier(s)/paramètre(s) | ${bp.deletedFilesPaths.size} supprimé(s)",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            if (bp.lastCompiledOutputImgPath.isNotBlank()) {
+                                                Text(
+                                                    text = "• Image Générée   : ${bp.lastCompiledOutputImgPath}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.secondary
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    bp.chainedCoherenceMechanismsTriggered.forEach { stepLine ->
+                                        Text(
+                                            text = stepLine,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+
+                                    if (bp.addedFilesPaths.isNotEmpty() || bp.modifiedFilesPaths.isNotEmpty()) {
+                                        val previewItems = (bp.modifiedFilesPaths.map { "[MODIFIÉ] $it" } +
+                                                bp.addedFilesPaths.map { "[AJOUTÉ] $it" }).take(10)
+                                        Text(
+                                            text = "Éléments intégrés dans la structure initiale :\n" + previewItems.joinToString("\n"),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                             Column(

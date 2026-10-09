@@ -1571,15 +1571,32 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update {
                 it.copy(
                     isBusy = true,
-                    activeTaskTitle = "R.E.C.O.R.E Auto-Guérison : Shims ELF64, Topologie SAR, Ré-alignement AVB/APK & Preuve Z3 SAT...",
-                    activeTaskProgress = 0.35f
+                    activeTaskTitle = "R.E.C.O.R.E Auto-Guérison & Repack Intelligent 1:1 (Fidélité 100% + Chaîne de Cohérence)...",
+                    activeTaskProgress = 0.25f
                 )
             }
             val currentKeys = ensureKeysAvailable(state)
-            val recoreReport = recoreEngine.analyzeAndReconstruct(
+            val packedOutputDir = storageManager.getPackedOutputImagesDir()
+
+            val (recoreReport, buildOut) = recoreEngine.reconstructAndCompileBootableImg(
                 unpackedRoot = targetDir,
                 activeKeys = currentKeys,
-                autoHealAndGenerateShims = true,
+                outputDir = packedOutputDir,
+                onProgress = { p, title ->
+                    _uiState.update { it.copy(activeTaskProgress = p, activeTaskTitle = title) }
+                },
+                onLog = { appendLog(it) }
+            )
+
+            // Export compiled .img to public ROM_FORGE/PACKED
+            val pubSysPath = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(buildOut.systemImgPath),
+                subFolder = "PACKED",
+                onLog = { appendLog(it) }
+            )
+            val pubVbPath = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(buildOut.vbmetaImgPath),
+                subFolder = "PACKED",
                 onLog = { appendLog(it) }
             )
 
@@ -1593,10 +1610,15 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 storageManager.exportSingleFileToPublicRomForge(pbReportFile, "KEY/Data") { appendLog(it) }
             }
 
+            val finalReportWithPubPath = recoreReport.copy(
+                initialStructureBlueprint = recoreReport.initialStructureBlueprint?.copy(
+                    lastCompiledOutputImgPath = pubSysPath
+                )
+            )
             val updatedApks = signProEngine.scanSystemApks(targetDir)
             val updatedMacXml = signProEngine.readCurrentMacPermissionsXml(targetDir)
             val preFlight = imgCompilerEngine.runPreFlightStaticAudit(
-                autoRepairBootloopRisks = true,
+                autoRepairBootloopRisks = false,
                 targetDecompiledDir = targetDir,
                 onLog = { appendLog(it) }
             )
@@ -1604,11 +1626,18 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             repository.clearAlerts()
             summary.alerts.forEach { repository.addAlert(it) }
 
+            val bp = finalReportWithPubPath.initialStructureBlueprint
+            val modeDesc = if (bp == null || bp.is100PercentIdenticalToInitial) {
+                "100% Identique à l'Initial (0 modification)"
+            } else {
+                "Structure Initiale + ${bp.modifiedFilesPaths.size} modifiés / ${bp.addedFilesPaths.size} ajoutés"
+            }
+
             recordActionCompleted(
                 moduleLabel = "R.E.C.O.R.E",
-                actionTitle = "Auto-Guérison Binaire (Shims ELF64) & Ré-alignement Total",
+                actionTitle = "Reconstruction & Repack Intelligent 1:1 (${File(pubSysPath).name})",
                 targetName = targetDir.name,
-                summaryDetail = "Verdict Z3=${recoreReport.smtStatus} (${recoreReport.bootConfidenceScore}/100) | ${recoreReport.generatedShims.size} Shims ELF64 | ${recoreReport.autoHealedCount} correctifs"
+                summaryDetail = "$modeDesc | Z3=${finalReportWithPubPath.smtStatus} (${finalReportWithPubPath.bootConfidenceScore}/100) -> $pubSysPath"
             )
 
             _uiState.update {
@@ -1619,7 +1648,11 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     scannedApks = updatedApks,
                     macPermissionsPreview = updatedMacXml,
                     preFlightItems = preFlight,
-                    recoreBrainReport = recoreReport,
+                    lastCompilationOutput = buildOut.copy(
+                        systemImgPath = pubSysPath,
+                        vbmetaImgPath = pubVbPath
+                    ),
+                    recoreBrainReport = finalReportWithPubPath,
                     verificationSummary = summary
                 )
             }

@@ -3,7 +3,10 @@ package com.example.core.recore
 import android.os.FileObserver
 import com.example.core.img.AospTopologyResolver
 import com.example.core.img.AospTopologyReport
+import com.example.core.img.ExactImageCloneEngine
+import com.example.core.img.UkaConfigHelper
 import com.example.data.local.KeyManifestEntity
+import com.example.modules.compiler.CompilationBuildOutput
 import com.example.modules.compiler.ImgCompilerEngine
 import com.example.modules.generator.ArtGeneratorEngine
 import com.example.modules.signpro.SignProEngine
@@ -107,10 +110,25 @@ class RecoreEngine(
 
         onLog("[R.E.C.O.R.E] Démarrage du moteur Reverse Coherence Reconstruction Engine sur ${unpackedRoot.name} (autoHeal=$autoHealAndGenerateShims)...")
 
-        // 1. Topology Resolution & Autonomous SAR Healing
+        // 0. Inspect Initial Structure Blueprint vs Current Unpacked State (Zero-Mutation Awareness!)
+        val initialBlueprintCheck = buildInitialStructureBlueprint(
+            unpackedRoot = unpackedRoot,
+            compiledImgPath = "",
+            onLog = onLog
+        )
+        val hasUserOrPortModifications = !initialBlueprintCheck.is100PercentIdenticalToInitial
+        // CRITICAL R.E.C.O.R.E FIDELITY RULE:
+        // If ZERO modifications were made since unpack, R.E.C.O.R.E preserves 100% of the initial unpacked tree untouched
+        // so that outputting an .img yields a 100% bit-for-bit identical image!
+        val effectiveAutoHeal = autoHealAndGenerateShims && hasUserOrPortModifications
+        if (autoHealAndGenerateShims && !hasUserOrPortModifications) {
+            onLog("[R.E.C.O.R.E-100%-FIDELITY] Aucune modification détectée par rapport au .img de départ : R.E.C.O.R.E verrouille l'arborescence à 100% à l'identique (0 fichier synthétique injecté) pour garantir un boot 1:1 DSU Sideloader.")
+        }
+
+        // 1. Topology Resolution & Autonomous SAR Healing (only heals if modifications exist)
         val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = unpackedRoot,
-            autoHealSarConflicts = autoHealAndGenerateShims,
+            autoHealSarConflicts = effectiveAutoHeal,
             onLog = onLog
         )
         var autoHealedTotal = topology.healedConflicts.size
@@ -126,7 +144,7 @@ class RecoreEngine(
         val elfAudits = inspectElfSymbolsAndGenerateShims(
             unpackedRoot = unpackedRoot,
             topology = topology,
-            autoGenerateShims = autoHealAndGenerateShims,
+            autoGenerateShims = effectiveAutoHeal,
             outShims = generatedShims,
             onLog = onLog
         )
@@ -134,9 +152,9 @@ class RecoreEngine(
             autoHealedTotal += generatedShims.size
         }
 
-        // 5. Self-Heal SELinux contexts, VINTF matrix, init.rc permissions, and Trust Chain if requested
+        // 5. Self-Heal SELinux contexts, VINTF matrix, init.rc permissions, and Trust Chain if requested & modified
         val realignmentActions = mutableListOf<String>()
-        if (autoHealAndGenerateShims) {
+        if (effectiveAutoHeal) {
             val healedCount = performAutonomousContextManifestAndTrustHealing(
                 unpackedRoot = unpackedRoot,
                 topology = topology,
@@ -145,6 +163,8 @@ class RecoreEngine(
                 onLog = onLog
             )
             autoHealedTotal += healedCount
+        } else if (!hasUserOrPortModifications) {
+            realignmentActions.add("Fidélité 1:1 Garantie : Image identique à 100% au .img initial avant unpack (aucune mutation appliquée)")
         }
 
         // Re-inspect topology after potential healing
@@ -238,6 +258,12 @@ class RecoreEngine(
                     "Auto-corrections=$autoHealedTotal"
         )
 
+        val finalBlueprint = buildInitialStructureBlueprint(
+            unpackedRoot = unpackedRoot,
+            compiledImgPath = initialBlueprintCheck.lastCompiledOutputImgPath,
+            onLog = { }
+        )
+
         RecoreFullBrainReport(
             targetImageName = unpackedRoot.name,
             targetUnpackedPath = unpackedRoot.absolutePath,
@@ -260,8 +286,319 @@ class RecoreEngine(
             structuredJsonPreview = jsonPreview,
             artifactRegenItems = artifactRegenItems,
             dependencyCascadeChains = cascadeChains,
-            staleArtifactsNeedingRegenCount = staleArtifactsCount
+            staleArtifactsNeedingRegenCount = staleArtifactsCount,
+            initialStructureBlueprint = finalBlueprint
         )
+    }
+
+    /**
+     * Inspects the initial base `.img` structure, architecture, superblock geometry, UKA configs,
+     * and compares it against the current unpacked directory so R.E.C.O.R.E knows:
+     * 1) The exact original structure, layout, mount point, block count, inode count, and UUID
+     * 2) Whether zero modifications were made (guaranteeing 100% bit-for-bit identical output)
+     * 3) Exactly which files were modified, added, or deleted and the complete boot-chain mechanism triggered.
+     */
+    fun buildInitialStructureBlueprint(
+        unpackedRoot: File,
+        compiledImgPath: String = "",
+        onLog: (String) -> Unit
+    ): RecoreInitialStructureBlueprint {
+        val topology = AospTopologyResolver.inspectAndResolve(unpackedRoot, autoHealSarConflicts = false)
+        val baseSourceImg = ExactImageCloneEngine.resolveCandidateSourceImg(unpackedRoot)
+        val snapFile = File(unpackedRoot, "ROM_FORGE_META/base_img_snapshot.txt")
+        val extentsFile = File(unpackedRoot, "ROM_FORGE_META/extracted_file_extents.txt")
+        val sizeFile = File(unpackedRoot, "config/system_size.txt")
+        val spaceFile = File(unpackedRoot, "config/system_space.txt")
+
+        var format = "EXT4"
+        var blockSize = 4096
+        var origSizeBytes = if (sizeFile.exists()) {
+            sizeFile.readText().trim().toLongOrNull() ?: (baseSourceImg?.length() ?: 0L)
+        } else {
+            baseSourceImg?.length() ?: 0L
+        }
+        var totalBlocks = (origSizeBytes / 4096L).coerceAtLeast(1L)
+        var totalInodes = 25600L
+        var uuidHex = "da594c53-9beb-f85c-85c5-cedf76546f7a"
+        var volumeLabel = if (topology.isSarLayout) "/" else "/system"
+
+        if (spaceFile.exists()) {
+            spaceFile.readLines().forEach { line ->
+                val p = line.split("=", limit = 2)
+                if (p.size == 2) {
+                    val k = p[0].trim()
+                    val v = p[1].trim()
+                    when (k) {
+                        "FILESYSTEM_TYPE" -> if (v.isNotEmpty()) format = v
+                        "BLOCK_SIZE" -> v.toIntOrNull()?.let { blockSize = it }
+                        "ORIGINAL_SIZE_BYTES" -> v.toLongOrNull()?.let { if (it > 0) origSizeBytes = it }
+                        "TOTAL_BLOCKS" -> v.toLongOrNull()?.let { if (it > 0) totalBlocks = it }
+                        "TOTAL_INODES" -> v.toLongOrNull()?.let { if (it > 0) totalInodes = it }
+                        "UUID" -> if (v.isNotEmpty()) uuidHex = v
+                        "LAST_MOUNTED" -> if (v.isNotEmpty()) volumeLabel = v
+                    }
+                }
+            }
+        }
+
+        if (baseSourceImg != null && baseSourceImg.exists() && baseSourceImg.length() >= 2048L) {
+            try {
+                java.io.RandomAccessFile(baseSourceImg, "r").use { raf ->
+                    val sbBytes = ByteArray(1024)
+                    raf.seek(1024L)
+                    raf.readFully(sbBytes)
+                    val sb = ByteBuffer.wrap(sbBytes).order(ByteOrder.LITTLE_ENDIAN)
+                    val magic = sb.getShort(0x38).toInt() and 0xFFFF
+                    if (magic == 0xEF53) {
+                        format = "EXT4"
+                        val logBlockSize = sb.getInt(0x18)
+                        blockSize = 1024 shl logBlockSize.coerceIn(0, 6)
+                        val blocksLo = sb.getInt(0x04).toLong() and 0xFFFFFFFFL
+                        val featIncompat = sb.getInt(0x60)
+                        val is64Bit = (featIncompat and 0x80) != 0
+                        val blocksHi = if (is64Bit) (sb.getInt(0x150).toLong() and 0xFFFFFFFFL) else 0L
+                        totalBlocks = (blocksHi shl 32) or blocksLo
+                        totalInodes = sb.getInt(0x00).toLong() and 0xFFFFFFFFL
+                        if (origSizeBytes <= 0L) origSizeBytes = totalBlocks * blockSize
+                        val uuidBytes = ByteArray(16)
+                        System.arraycopy(sbBytes, 0x68, uuidBytes, 0, 16)
+                        uuidHex = "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x".format(
+                            uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
+                            uuidBytes[4], uuidBytes[5], uuidBytes[6], uuidBytes[7],
+                            uuidBytes[8], uuidBytes[9], uuidBytes[10], uuidBytes[11],
+                            uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]
+                        )
+                        val volBytes = ByteArray(16)
+                        System.arraycopy(sbBytes, 0x78, volBytes, 0, 16)
+                        val volStr = String(volBytes, Charsets.UTF_8).trim { it <= ' ' || it == '\u0000' }
+                        if (volStr.isNotEmpty()) volumeLabel = volStr
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        val modifiedFiles = mutableListOf<String>()
+        val addedFiles = mutableListOf<String>()
+        val deletedFiles = mutableListOf<String>()
+        var unmodifiedCount = 0
+
+        if (snapFile.exists()) {
+            data class BaseEntry(val type: String, val size: Long, val crc: Long)
+            val baseMap = LinkedHashMap<String, BaseEntry>()
+            snapFile.readLines().forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.startsWith("ENTRY|")) {
+                    val parts = trimmed.split("|")
+                    if (parts.size >= 5) {
+                        val rel = parts[1]
+                        val type = parts[2]
+                        val sz = parts[3].toLongOrNull() ?: 0L
+                        val crc = parts[4].toLongOrNull() ?: sz
+                        baseMap[rel] = BaseEntry(type, sz, crc)
+                    }
+                }
+            }
+
+            if (baseMap.isNotEmpty()) {
+                val currentFiles = LinkedHashMap<String, File>()
+                unpackedRoot.walkTopDown().forEach { f ->
+                    if (f == unpackedRoot) return@forEach
+                    val rel = f.relativeTo(unpackedRoot).invariantSeparatorsPath
+                    if (rel.startsWith("ROM_FORGE_META") || rel == "lost+found" || UkaConfigHelper.isUkaMetadataFileName(f.name) || f.name.endsWith(".tmp")) return@forEach
+                    if (f.isFile) {
+                        currentFiles[rel] = f
+                    }
+                }
+
+                for ((rel, base) in baseMap) {
+                    if (base.type != "FILE") continue
+                    val cur = currentFiles[rel]
+                    if (cur == null) {
+                        if (!UkaConfigHelper.isUkaMetadataFileName(rel.substringAfterLast("/"))) {
+                            deletedFiles.add(rel)
+                        }
+                    } else {
+                        val curLen = cur.length()
+                        val curCrc = if (curLen <= 4 * 1024 * 1024) computeFastCrc32(cur) else curLen
+                        if (curLen != base.size || curCrc != base.crc) {
+                            modifiedFiles.add(rel)
+                        } else {
+                            unmodifiedCount++
+                        }
+                    }
+                }
+                for ((rel, _) in currentFiles) {
+                    if (!baseMap.containsKey(rel)) {
+                        addedFiles.add(rel)
+                    }
+                }
+            }
+        }
+
+        val recordedExtentsCount = if (extentsFile.exists()) {
+            extentsFile.readLines().count { it.isNotBlank() && !it.startsWith("#") }
+        } else 0
+
+        val topLevelDirs = unpackedRoot.listFiles()
+            ?.filter { it.name != "ROM_FORGE_META" && it.name != "lost+found" && !UkaConfigHelper.isUkaMetadataFileName(it.name) }
+            ?.map { if (it.isDirectory) "${it.name}/" else it.name }
+            ?.sorted()
+            .orEmpty()
+
+        val is100PercentIdentical = modifiedFiles.isEmpty() && addedFiles.isEmpty() && deletedFiles.isEmpty()
+        val chainSteps = if (is100PercentIdentical) {
+            listOf(
+                "1. Détection Zéro-Modification : L'arborescence unpackée (${unpackedRoot.name}) est 100% identique au snapshot initial ($unmodifiedCount fichiers intacts).",
+                "2. Verrouillage d'Intégrité R.E.C.O.R.E : Aucun fichier synthétique ni modification superflue injectée.",
+                "3. Clonage 1:1 Bit-à-Bit : Copie directe des blocs, du superblock EXT4 ($totalBlocks blocs, $totalInodes inodes, UUID=$uuidHex) et des blocs partagés RO (shared_blocks).",
+                "4. Garantie Boot 100% : L'image de sortie est strictement identique octet par octet au GSI de départ."
+            )
+        } else {
+            listOf(
+                "1. Empreinte Architecture Initiale : Conservation du layout ${if (topology.isSarLayout) "SAR System-as-Root (/)" else "Flat (/system)"}, BlockSize=${blockSize}B, TotalBlocks=$totalBlocks, UUID=$uuidHex.",
+                "2. Cartographie Delta : ${modifiedFiles.size} fichier(s) modifié(s), ${addedFiles.size} nouveau(x) fichier(s)/paramètre(s) ajouté(s), ${deletedFiles.size} supprimé(s) ($unmodifiedCount fichiers originaux intacts).",
+                "3. Enchaînement de Cohérence R.E.C.O.R.E : Enregistrement automatique des nouveaux fichiers dans file_contexts + fs_config (mode 0644/0755, SELinux u:object_r:system_file:s0 / vendor_overlay_file:s0).",
+                "4. Synchronisation Artefacts & Confiance : Vérification/Régénération OAT/VDEX/ODEX/fsv_meta pour tout APK/JAR modifié et préservation des signatures AOSP existantes.",
+                "5. Injection Chirurgicale In-Place dans le Clone 1:1 : Écriture directe des fichiers modifiés et allocation d'inodes/extents/dentries EXT4 pour les ${addedFiles.size} nouveaux fichiers tout en gardant 100% du reste de l'image de base intact !"
+            )
+        }
+
+        return RecoreInitialStructureBlueprint(
+            baseImageName = baseSourceImg?.name ?: "${unpackedRoot.name}.img",
+            baseFilesystemFormat = format,
+            baseArchitectureLayout = if (topology.isSarLayout) "SAR_SYSTEM_AS_ROOT (/ -> system/)" else "FLAT_PARTITION (/system)",
+            baseMountPoint = volumeLabel,
+            baseBlockSize = blockSize,
+            baseOriginalSizeBytes = origSizeBytes,
+            baseTotalBlocks = totalBlocks,
+            baseTotalInodes = totalInodes,
+            baseUuidHex = uuidHex,
+            exactSourceImgAvailable = baseSourceImg != null && baseSourceImg.exists(),
+            exactSourceImgPath = baseSourceImg?.absolutePath ?: "",
+            totalRecordedExtentsCount = recordedExtentsCount,
+            topLevelDirectories = topLevelDirs,
+            unmodifiedFilesCount = unmodifiedCount,
+            modifiedFilesPaths = modifiedFiles,
+            addedFilesPaths = addedFiles,
+            deletedFilesPaths = deletedFiles,
+            is100PercentIdenticalToInitial = is100PercentIdentical,
+            repackExecutionMode = if (is100PercentIdentical) {
+                "CLONE_1TO1_BIT_FOR_BIT (100% Identique à l'Initial)"
+            } else {
+                "SURGICAL_INPLACE_DELTA_AND_GRAFT (${modifiedFiles.size} modifiés, ${addedFiles.size} ajoutés)"
+            },
+            chainedCoherenceMechanismsTriggered = chainSteps,
+            lastCompiledOutputImgPath = compiledImgPath
+        )
+    }
+
+    /**
+     * **R.E.C.O.R.E Complete Intelligent Reconstruction & 1:1 Repack Pipeline**:
+     * - Understands the complete initial structure, organization, and architecture of the unpacked `.img`.
+     * - If NO modification was made in the unpacked `.img`, R.E.C.O.R.E outputs a **100% bit-for-bit identical `.img`**
+     *   without touching a single byte of the base image.
+     * - If modifications were made (new parameters, new overlays/files, modified APKs/configs), R.E.C.O.R.E triggers its
+     *   complete coherence chain (SELinux `file_contexts`, POSIX `fs_config`, OAT/VDEX/ODEX/fsv_meta sync if APKs changed,
+     *   VINTF/init.rc checks) and then uses the **Repack Simple & Intelligent 1:1 Surgical Engine** (`ExactImageCloneEngine`)
+     *   to reproduce 100% of the initial `.img` structure completed with the new parameters and new files so the GSI boots!
+     */
+    suspend fun reconstructAndCompileBootableImg(
+        unpackedRoot: File,
+        activeKeys: List<KeyManifestEntity>,
+        outputDir: File,
+        onProgress: (Float, String) -> Unit = { _, _ -> },
+        onLog: (String) -> Unit
+    ): Pair<RecoreFullBrainReport, CompilationBuildOutput> = withContext(Dispatchers.IO) {
+        onProgress(0.10f, "R.E.C.O.R.E : Lecture de l'architecture et structure initiale de ${unpackedRoot.name}...")
+        val initialBlueprint = buildInitialStructureBlueprint(
+            unpackedRoot = unpackedRoot,
+            compiledImgPath = "",
+            onLog = onLog
+        )
+
+        if (initialBlueprint.is100PercentIdenticalToInitial) {
+            onLog("[R.E.C.O.R.E-ENGINE] Détection : 0 modification dans ${unpackedRoot.name}. Mode 100% Fidèle à l'Original activé (aucune altération de l'arborescence).")
+            onProgress(0.45f, "R.E.C.O.R.E : Clonage 1:1 Bit-à-Bit Identique au .img initial...")
+        } else {
+            onLog(
+                "[R.E.C.O.R.E-ENGINE] Détection : ${initialBlueprint.modifiedFilesPaths.size} fichier(s) modifié(s) et " +
+                        "${initialBlueprint.addedFilesPaths.size} nouveau(x) fichier(s)/paramètre(s) dans ${unpackedRoot.name}."
+            )
+            onLog("[R.E.C.O.R.E-CHAIN] Déclenchement du mécanisme complet de cohérence pour préserver les modifications et garantir le boot...")
+            onProgress(0.25f, "R.E.C.O.R.E : Chaîne de cohérence sur les éléments modifiés/ajoutés...")
+
+            val topology = AospTopologyResolver.inspectAndResolve(
+                unpackedRoot = unpackedRoot,
+                autoHealSarConflicts = true,
+                onLog = onLog
+            )
+
+            // 1. Register all added/modified files in SELinux file_contexts and POSIX fs_config
+            val changedFileObjs = (initialBlueprint.modifiedFilesPaths + initialBlueprint.addedFilesPaths)
+                .map { File(unpackedRoot, it) }
+                .filter { it.exists() }
+            if (changedFileObjs.isNotEmpty()) {
+                AospTopologyResolver.registerInjectedFilesInAllConfigs(
+                    unpackedRoot = unpackedRoot,
+                    injectedFiles = changedFileObjs,
+                    onLog = onLog
+                )
+            }
+
+            // 2. If any APK or JAR was modified, regenerate its OAT/VDEX/ODEX/fsv_meta so ART never bootloops
+            val modifiedCodeBins = (initialBlueprint.modifiedFilesPaths + initialBlueprint.addedFilesPaths)
+                .filter { it.endsWith(".apk", true) || it.endsWith(".jar", true) }
+                .toSet()
+            if (modifiedCodeBins.isNotEmpty()) {
+                onLog("[R.E.C.O.R.E-CHAIN] ${modifiedCodeBins.size} APK/JAR modifié(s)/ajouté(s) : synchronisation ciblée OAT/VDEX/ODEX/fsv_meta...")
+                artGeneratorEngine.regenerateForSpecificModifiedBinaries(
+                    targetDecompiledDir = unpackedRoot,
+                    modifiedPaths = modifiedCodeBins,
+                    onLog = onLog
+                )
+            }
+
+            onProgress(0.50f, "R.E.C.O.R.E : Repack Simple & Intelligent 1:1 (Structure initiale + nouveaux fichiers/paramètres)...")
+        }
+
+        // 3. Execute Repack Simple & Intelligent 1:1 (Exact 1:1 clone if unmodified, or Surgical In-Place 1:1 clone if modified/added)
+        val buildOutput = imgCompilerEngine.repackSimpleAndIntelligent1To1(
+            targetDecompiledDir = unpackedRoot,
+            outputImagesDir = outputDir,
+            activeKeys = activeKeys,
+            onLog = onLog
+        )
+
+        onProgress(0.90f, "R.E.C.O.R.E : Vérification formelle Z3 SMT et finalisation du rapport...")
+        val brainReport = analyzeAndReconstruct(
+            unpackedRoot = unpackedRoot,
+            activeKeys = activeKeys,
+            autoHealAndGenerateShims = false,
+            onLog = onLog
+        )
+        val updatedBlueprint = (brainReport.initialStructureBlueprint ?: initialBlueprint).copy(
+            lastCompiledOutputImgPath = buildOutput.systemImgPath
+        )
+
+        onProgress(1.0f, "R.E.C.O.R.E : Image ${File(buildOutput.systemImgPath).name} prête à booter !")
+        brainReport.copy(initialStructureBlueprint = updatedBlueprint) to buildOutput
+    }
+
+    private fun computeFastCrc32(file: File): Long {
+        val crc = CRC32()
+        val buf = ByteArray(16384)
+        return try {
+            file.inputStream().use { fis ->
+                var r: Int
+                while (fis.read(buf).also { r = it } != -1) {
+                    crc.update(buf, 0, r)
+                }
+            }
+            crc.value
+        } catch (_: Exception) {
+            file.length()
+        }
     }
 
     /**

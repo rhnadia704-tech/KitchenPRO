@@ -162,6 +162,30 @@ data class RecoreDependencyCascadeChain(
     val resolutionStatus: String        // COHERENT, NEEDS_REGENERATION, AUTO_RESOLVED
 )
 
+data class RecoreInitialStructureBlueprint(
+    val baseImageName: String,
+    val baseFilesystemFormat: String,
+    val baseArchitectureLayout: String,       // SAR_SYSTEM_AS_ROOT vs FLAT_PARTITION
+    val baseMountPoint: String,
+    val baseBlockSize: Int,
+    val baseOriginalSizeBytes: Long,
+    val baseTotalBlocks: Long,
+    val baseTotalInodes: Long,
+    val baseUuidHex: String,
+    val exactSourceImgAvailable: Boolean,
+    val exactSourceImgPath: String,
+    val totalRecordedExtentsCount: Int,
+    val topLevelDirectories: List<String>,
+    val unmodifiedFilesCount: Int,
+    val modifiedFilesPaths: List<String>,
+    val addedFilesPaths: List<String>,
+    val deletedFilesPaths: List<String>,
+    val is100PercentIdenticalToInitial: Boolean,
+    val repackExecutionMode: String,          // CLONE_1TO1_BIT_FOR_BIT, SURGICAL_INPLACE_DELTA_AND_GRAFT, ZERO_MUTATION_EXT4_REBUILD
+    val chainedCoherenceMechanismsTriggered: List<String>,
+    val lastCompiledOutputImgPath: String = ""
+)
+
 data class RecoreFullBrainReport(
     val targetImageName: String,
     val targetUnpackedPath: String,
@@ -184,5 +208,6 @@ data class RecoreFullBrainReport(
     val structuredJsonPreview: String,
     val artifactRegenItems: List<RecoreArtifactRegenItem> = emptyList(),
     val dependencyCascadeChains: List<RecoreDependencyCascadeChain> = emptyList(),
-    val staleArtifactsNeedingRegenCount: Int = 0
+    val staleArtifactsNeedingRegenCount: Int = 0,
+    val initialStructureBlueprint: RecoreInitialStructureBlueprint? = null
 )
