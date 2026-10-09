@@ -117,10 +117,10 @@ class ImgCompilerEngine(
 
         val fcCandidates = listOf(
             File(systemRoot, "config/system_file_contexts"),
-            File(topology.selinuxDir, "plat_file_contexts"),
             File(systemRoot, "ROM_FORGE_META/extracted_file_contexts.txt")
         )
         val fcFile = fcCandidates.firstOrNull { it.exists() } ?: File(topology.selinuxDir, "plat_file_contexts")
+        val isUkaConfigFc = fcFile.invariantSeparatorsPath.contains("/config/") || fcFile.invariantSeparatorsPath.contains("/ROM_FORGE_META/")
         if (fcFile.exists()) {
             val lines = fcFile.readLines().toMutableList()
             var syntaxErrors = 0
@@ -133,7 +133,7 @@ class ImgCompilerEngine(
                 val regexStr = parts.firstOrNull() ?: ""
                 val contextStr = parts.lastOrNull() ?: ""
 
-                val validLabel = contextStr.startsWith("u:object_r:") && contextStr.endsWith(":s0")
+                val validLabel = contextStr.startsWith("u:object_r:")
                 val validRegex = try {
                     Pattern.compile(regexStr)
                     true
@@ -143,14 +143,14 @@ class ImgCompilerEngine(
 
                 if (!validLabel || !validRegex) {
                     syntaxErrors++
-                    if (autoRepairBootloopRisks) {
+                    if (autoRepairBootloopRisks && isUkaConfigFc) {
                         lines[i] = "$regexStr u:object_r:system_file:s0"
                         repaired = true
                     }
                 }
             }
 
-            if (repaired) {
+            if (repaired && isUkaConfigFc) {
                 fcFile.writeText(lines.joinToString("\n"))
                 onLog("[UKA-AUDIT] Auto-réparation appliquée sur $syntaxErrors ligne(s) SELinux dans ${fcFile.name}")
             }

@@ -568,7 +568,11 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     themePreference = uiState.themePreference,
                                     onSelectThemePreference = viewModel::setThemePreference,
                                     onNavigateToTab = viewModel::selectTab,
-                                    onRunCommandInTerminal = viewModel::executeInteractiveTerminalCommand
+                                    onRunCommandInTerminal = viewModel::executeInteractiveTerminalCommand,
+                                    isBusy = uiState.isBusy,
+                                    lastGeneratedPdfDoc = uiState.lastGeneratedPdfDoc,
+                                    onGenerateTechnicalPdf = viewModel::generateTechnicalManualPdf,
+                                    onSaveTechnicalPdfToUri = viewModel::saveTechnicalManualPdfToUri
                                 )
                             }
                         }

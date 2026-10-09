@@ -54,6 +54,9 @@ object ExactImageCloneEngine {
     private const val EXT4_EXTENT_MAGIC: Short = 0xF30A.toShort()
     private const val EXT4_XATTR_MAGIC: Int = -0x15fe0000 // 0xEA020000
     private const val EXT4_EXTENTS_FL = 0x00080000
+    private const val EXT4_FEATURE_RO_COMPAT_METADATA_CSUM = 0x0400
+    private const val EXT4_FEATURE_RO_COMPAT_GDT_CSUM = 0x0010
+    private const val EXT4_FEATURE_RO_COMPAT_SHARED_BLOCKS = 0x4000
 
     private data class RecordedExtent(
         val logicalBlock: Long,
@@ -304,10 +307,24 @@ object ExactImageCloneEngine {
                     raf.readFully(tail)
                     if (tail[0] == 'A'.code.toByte() && tail[1] == 'V'.code.toByte() && tail[2] == 'B'.code.toByte() && tail[3] == 'f'.code.toByte()) {
                         val tb = ByteBuffer.wrap(tail).order(ByteOrder.BIG_ENDIAN)
+                        // In AVB 2.0 AVBFooter: magic[4] (0..3), version_major (4..7), version_minor (8..11), original_image_size (12..19)!
+                        // Wait: let's check both offset 12 (standard AVBFooter) and superblock blocksCountLo * blockSize so we never truncate into the filesystem!
                         val avbOrigFsSize = tb.getLong(12)
-                        if (avbOrigFsSize in 4096L until origLen) {
-                            raf.setLength(avbOrigFsSize)
-                            onLog("[RECORE-AVB-TRIM] Footer AVB d'origine tronqué à la taille exacte du filesystem (${avbOrigFsSize / (1024 * 1024)} MB) pour autoriser les modifications sur DSU Sideloader.")
+                        val sbProbe = ByteArray(1024)
+                        raf.seek(1024L)
+                        raf.readFully(sbProbe)
+                        val sbBuf = ByteBuffer.wrap(sbProbe).order(ByteOrder.LITTLE_ENDIAN)
+                        val sbBlks = sbBuf.getInt(0x04).toLong() and 0xFFFFFFFFL
+                        val sbBlkSz = 1024L shl sbBuf.getInt(0x18)
+                        val ext4FsBytes = sbBlks * sbBlkSz
+                        val safeTrimLen = when {
+                            avbOrigFsSize in 4096L until origLen && avbOrigFsSize >= ext4FsBytes -> avbOrigFsSize
+                            ext4FsBytes in 4096L until origLen -> ext4FsBytes
+                            else -> origLen
+                        }
+                        if (safeTrimLen < origLen) {
+                            raf.setLength(safeTrimLen)
+                            onLog("[RECORE-AVB-TRIM] Footer AVB d'origine tronqué à la taille exacte du filesystem EXT4 (${safeTrimLen / (1024 * 1024)} MB) pour autoriser les modifications sur DSU Sideloader.")
                         }
                     }
                 }
@@ -331,9 +348,25 @@ object ExactImageCloneEngine {
                 val inodesPerGroup = (sb.getInt(0x28).toLong() and 0xFFFFFFFFL).toInt().coerceAtLeast(512)
                 val inodeSize = (sb.getShort(0x58).toInt() and 0xFFFF).let { if (it == 0) 128 else it }
                 val featureIncompat = sb.getInt(0x60)
+                var featureRoCompat = sb.getInt(0x64)
                 val is64Bit = (featureIncompat and 0x80) != 0
                 val rawDescSize = sb.getShort(0xFE).toInt() and 0xFFFF
                 val groupDescSize = if (is64Bit && rawDescSize >= 64) rawDescSize else 32
+
+                // CRITICAL ANTI-BOOTLOOP FIX FOR DSU SIDELOADER / LINUX KERNEL EXT4:
+                // When we surgically modify or inject inodes/directory blocks/bitmaps inside a cloned GSI,
+                // if `EXT4_FEATURE_RO_COMPAT_METADATA_CSUM` (0x0400) or `GDT_CSUM` (0x0010) was set on the original superblock,
+                // the Linux kernel will verify CRC32C checksums on every modified inode, bitmap, and directory tail (`0xDE`)
+                // and panic with `EXT4-fs error: metadata_csum failed` at Stage 1 mount!
+                // Clearing `METADATA_CSUM` and `GDT_CSUM` in `s_feature_ro_compat` while keeping `SHARED_BLOCKS` (0x4000),
+                // `LARGE_FILE` (0x0002) and `EXTRA_ISIZE` (0x0040) allows the kernel to mount the mutated EXT4 cleanly!
+                if ((featureRoCompat and (EXT4_FEATURE_RO_COMPAT_METADATA_CSUM or EXT4_FEATURE_RO_COMPAT_GDT_CSUM)) != 0) {
+                    featureRoCompat = featureRoCompat and (EXT4_FEATURE_RO_COMPAT_METADATA_CSUM or EXT4_FEATURE_RO_COMPAT_GDT_CSUM).inv()
+                    sb.putInt(0x64, featureRoCompat)
+                    raf.seek(1024L)
+                    raf.write(sbBytes)
+                    onLog("[RECORE-EXT4-CSUM] Flags RO_COMPAT METADATA_CSUM/GDT_CSUM désactivés proprement dans le Superblock pour autoriser la greffe chirurgicale In-Place sans rejet CRC32C du noyau.")
+                }
 
                 val gdtBaseOffset = if (blockSize == 1024) 2048L else blockSize.toLong()
                 var numGroups = ((blocksCountLo + blocksPerGroup - 1) / blocksPerGroup).toInt().coerceAtLeast(1)
@@ -376,32 +409,113 @@ object ExactImageCloneEngine {
                     return inoTblBlk * blockSize + idxInG * inodeSize
                 }
 
-                // Ensure the image has enough free blocks and free inodes for any grown or added files
+                // Ensure the image has enough contiguous free blocks and free inodes for any Copy-on-Write modified or added files
                 val extraBlocksNeeded = addedPaths.sumOf { rel ->
                     val f = File(unpackedRoot, rel)
                     if (f.exists() && f.isFile) ((f.length() + blockSize - 1) / blockSize).toInt() + 2 else 2
                 } + changedPaths.sumOf { rel ->
                     val f = File(unpackedRoot, rel)
-                    val rec = extentMap[rel]
-                    if (f.exists() && rec != null && f.length() > rec.totalAllocatedBlocks * blockSize) {
-                        ((f.length() + blockSize - 1) / blockSize).toInt() + 1
-                    } else 0
-                } + 32
+                    if (f.exists() && f.isFile) ((f.length() + blockSize - 1) / blockSize).toInt() + 2 else 2
+                } + 256
+
+                // Helper to append a fresh EXT4 Block Group at the end of the image when existing groups have 0 free blocks or 0 free inodes!
+                fun appendFreshBlockGroup(minDataBlocks: Int) {
+                    // Align blocksCountLo to next multiple of blocksPerGroup so the new group starts on a clean group boundary
+                    val alignedStartBlk = ((blocksCountLo + blocksPerGroup - 1) / blocksPerGroup) * blocksPerGroup
+                    val inodeTblBlks = (inodesPerGroup * inodeSize + blockSize - 1) / blockSize
+                    val metaOverhead = 2 + inodeTblBlks
+                    val groupTotalBlks = (minDataBlocks + metaOverhead + 256).coerceAtMost(blocksPerGroup)
+                    val newTotalBlks = alignedStartBlk + groupTotalBlks
+                    raf.setLength(newTotalBlks * blockSize)
+
+                    val newGIdx = (alignedStartBlk / blocksPerGroup).toInt()
+                    if (newGIdx + 1 > numGroups) {
+                        numGroups = newGIdx + 1
+                    }
+
+                    val blkBmpBlk = alignedStartBlk
+                    val inoBmpBlk = alignedStartBlk + 1
+                    val inoTblBlk = alignedStartBlk + 2
+
+                    // Initialize block bitmap for new group: mark metadata blocks (0 until metaOverhead) and out-of-range tail bits as used
+                    val blkBmp = ByteArray(blockSize)
+                    for (b in 0 until metaOverhead) {
+                        blkBmp[b ushr 3] = (blkBmp[b ushr 3].toInt() or (1 shl (b and 7))).toByte()
+                    }
+                    for (b in groupTotalBlks until blocksPerGroup) {
+                        val idx = b ushr 3
+                        if (idx < blockSize) {
+                            blkBmp[idx] = (blkBmp[idx].toInt() or (1 shl (b and 7))).toByte()
+                        }
+                    }
+                    raf.seek(blkBmpBlk * blockSize)
+                    raf.write(blkBmp)
+
+                    // Initialize inode bitmap for new group: all 0 (all inodes free!)
+                    val inoBmp = ByteArray(blockSize)
+                    for (b in inodesPerGroup until (blockSize * 8)) {
+                        val idx = b ushr 3
+                        if (idx < blockSize) {
+                            inoBmp[idx] = (inoBmp[idx].toInt() or (1 shl (b and 7))).toByte()
+                        }
+                    }
+                    raf.seek(inoBmpBlk * blockSize)
+                    raf.write(inoBmp)
+
+                    // Zero out inode table
+                    val zeroPage = ByteArray(blockSize)
+                    for (b in 0 until inodeTblBlks) {
+                        raf.seek((inoTblBlk + b) * blockSize)
+                        raf.write(zeroPage)
+                    }
+
+                    val freeBlksInNewGroup = (groupTotalBlks - metaOverhead).coerceAtLeast(0)
+                    val gdBytes = ByteArray(groupDescSize)
+                    val gd = ByteBuffer.wrap(gdBytes).order(ByteOrder.LITTLE_ENDIAN)
+                    gd.putInt(0x00, (blkBmpBlk and 0xFFFFFFFFL).toInt())
+                    gd.putInt(0x04, (inoBmpBlk and 0xFFFFFFFFL).toInt())
+                    gd.putInt(0x08, (inoTblBlk and 0xFFFFFFFFL).toInt())
+                    gd.putShort(0x0C, (freeBlksInNewGroup and 0xFFFF).toShort())
+                    gd.putShort(0x0E, (inodesPerGroup and 0xFFFF).toShort())
+                    gd.putShort(0x10, 0.toShort())
+                    gd.putShort(0x12, 0x0004.toShort()) // EXT4_BG_INODE_ZEROED
+                    if (groupDescSize >= 64) {
+                        gd.putInt(0x20, (blkBmpBlk ushr 32).toInt())
+                        gd.putInt(0x24, (inoBmpBlk ushr 32).toInt())
+                        gd.putInt(0x28, (inoTblBlk ushr 32).toInt())
+                        gd.putShort(0x2C, (freeBlksInNewGroup ushr 16).toShort())
+                        gd.putShort(0x2E, (inodesPerGroup ushr 16).toShort())
+                    }
+                    writeGroupDescriptor(newGIdx, gdBytes)
+
+                    blocksCountLo = newTotalBlks
+                    freeBlocksLo += freeBlksInNewGroup
+                    inodesCount = numGroups.toLong() * inodesPerGroup
+                    freeInodes += inodesPerGroup
+
+                    sb.putInt(0x00, inodesCount.toInt())
+                    sb.putInt(0x04, blocksCountLo.toInt())
+                    sb.putInt(0x0C, freeBlocksLo.toInt())
+                    sb.putInt(0x10, freeInodes.toInt())
+                    raf.seek(1024L)
+                    raf.write(sbBytes)
+                    onLog("[RECORE-EXT4-NEWGROUP] Groupe EXT4 #$newGIdx ajouté en fin d'image (+$freeBlksInNewGroup blocs libres, +$inodesPerGroup inodes libres).")
+                }
 
                 // If the original GSI was shrunk to minimum (`resize2fs -M` / `e2fsdroid -s`) and has fewer free blocks
                 // or free inodes than needed, expand the last block group (up to blocksPerGroup) or append a new group!
                 val lastGroupIdx = numGroups - 1
                 val lastGroupStartBlk = lastGroupIdx.toLong() * blocksPerGroup
                 val blocksInLastGroup = (blocksCountLo - lastGroupStartBlk).toInt()
-                if ((freeBlocksLo < extraBlocksNeeded || freeInodes < (addedPaths.size + 16)) && blocksInLastGroup < blocksPerGroup) {
-                    val expandBlks = min((extraBlocksNeeded + 256).toLong(), (blocksPerGroup - blocksInLastGroup).toLong())
-                    if (expandBlks > 0) {
+                if (freeBlocksLo < extraBlocksNeeded) {
+                    val roomInLastGroup = (blocksPerGroup - blocksInLastGroup).coerceAtLeast(0)
+                    if (roomInLastGroup >= extraBlocksNeeded) {
+                        val expandBlks = min((extraBlocksNeeded + 512).toLong(), roomInLastGroup.toLong())
                         val oldBlocksCount = blocksCountLo
                         blocksCountLo += expandBlks
                         freeBlocksLo += expandBlks
                         raf.setLength(blocksCountLo * blockSize)
 
-                        // Clear the newly added block bits in the last group's block bitmap so they can be allocated!
                         val gdBytes = readGroupDescriptor(lastGroupIdx)
                         val gd = ByteBuffer.wrap(gdBytes).order(ByteOrder.LITTLE_ENDIAN)
                         val bmpBlk = getGdBlockBitmap(gd)
@@ -416,7 +530,6 @@ object ExactImageCloneEngine {
 
                         val curFreeG = (gd.getShort(0x0C).toInt() and 0xFFFF) + expandBlks.toInt()
                         gd.putShort(0x0C, curFreeG.coerceAtMost(65535).toShort())
-                        // Clear EXT4_BG_BLOCK_UNINIT (0x0002) if set
                         val bgFlags = gd.getShort(0x12).toInt() and 0xFFFF
                         gd.putShort(0x12, (bgFlags and 0x0002.inv()).toShort())
                         writeGroupDescriptor(lastGroupIdx, gdBytes)
@@ -426,10 +539,15 @@ object ExactImageCloneEngine {
                         raf.seek(1024L)
                         raf.write(sbBytes)
                         onLog("[RECORE-EXT4-EXPAND] Dernier groupe EXT4 étendu de +$expandBlks blocs ($oldBlocksCount -> $blocksCountLo blocs) sans toucher aux groupes existants.")
+                    } else {
+                        appendFreshBlockGroup(extraBlocksNeeded)
                     }
                 }
+                if (freeInodes < (addedPaths.size + 32)) {
+                    appendFreshBlockGroup(extraBlocksNeeded.coerceAtLeast(512))
+                }
 
-                // Helper to allocate `count` free blocks from the existing block bitmaps
+                // Helper to allocate `count` free blocks from the existing block bitmaps (or append cleanly at EOF if bitmaps are full)
                 fun allocateFreeBlocks(needed: Int): List<RecordedExtent> {
                     if (needed <= 0) return emptyList()
                     val allocatedBlocks = mutableListOf<Long>()
@@ -478,7 +596,7 @@ object ExactImageCloneEngine {
                         }
                     }
 
-                    // If the original image was 100% packed with 0 free blocks in bitmaps, append blocks at EOF inside the last group or extend EOF
+                    // If the original image was 100% packed with 0 free blocks in bitmaps, append blocks at EOF
                     if (rem > 0) {
                         val startNewBlk = blocksCountLo
                         blocksCountLo += rem
@@ -493,7 +611,7 @@ object ExactImageCloneEngine {
                     raf.seek(1024L)
                     raf.write(sbBytes)
 
-                    // Group contiguous physical blocks into up to 4 extents
+                    // Group contiguous physical blocks into extents
                     val runs = mutableListOf<RecordedExtent>()
                     var logCursor = 0L
                     var idx = 0
@@ -577,25 +695,27 @@ object ExactImageCloneEngine {
                     }
                 }
 
-                // 2. Patch MODIFIED existing files in-place (preserving their original inode, xattrs, and directory entry!)
+                // 2. Patch MODIFIED existing files using Copy-On-Write (CoW) block allocation!
+                // CRITICAL ANTI-BOOTLOOP FOR SHARED_BLOCKS GSIs:
+                // Never overwrite the original physical blocks of a modified file in-place if the GSI uses `SHARED_BLOCKS`
+                // deduplication (`e2fsdroid -s`), because another file or symlink block could be sharing those physical blocks!
+                // Allocating fresh blocks for the modified file (while keeping its exact original Inode number, SELinux xattr,
+                // permissions, and directory entry) guarantees 0 collateral corruption on deduplicated blocks!
                 for (modRel in changedPaths) {
                     val rec = extentMap[modRel] ?: return false
                     val curFile = File(unpackedRoot, modRel)
                     if (!curFile.exists()) continue
 
                     val newSize = curFile.length()
-                    val neededBlocks = ((newSize + blockSize - 1) / blockSize).toInt()
-                    val targetExtents = if (newSize <= rec.totalAllocatedBlocks * blockSize) {
-                        rec.extents
-                    } else {
-                        val alloc = allocateFreeBlocks(neededBlocks)
-                        if (alloc.size > 4) return false // Fallback to full builder if fragmented > 4 extents
-                        alloc
+                    val neededBlocks = ((newSize + blockSize - 1) / blockSize).toInt().coerceAtLeast(if (newSize > 0) 1 else 0)
+                    val cowExtents = allocateFreeBlocks(neededBlocks)
+                    if (cowExtents.size > 4) return false
+
+                    if (cowExtents.isNotEmpty()) {
+                        writeStreamToExtents(curFile, cowExtents)
                     }
 
-                    writeStreamToExtents(curFile, targetExtents)
-
-                    // Update i_size_lo, i_size_high, i_blocks_lo, and (if reallocated) extent tree inside the original inode!
+                    // Update i_size_lo, i_size_high, i_blocks_lo, and extent tree inside the original inode (preserving all xattrs & mode!)
                     val inoOff = getInodeOffset(rec.inodeNumber)
                     val rawIno = ByteArray(inodeSize)
                     raf.seek(inoOff)
@@ -605,56 +725,86 @@ object ExactImageCloneEngine {
                     if (inodeSize > 0x70) {
                         ib.putInt(0x6C, ((newSize ushr 32) and 0xFFFFFFFFL).toInt())
                     }
-                    val totalBlks = targetExtents.sumOf { it.blockCount }
+                    val totalBlks = cowExtents.sumOf { it.blockCount }
                     ib.putInt(0x1C, totalBlks * (blockSize / 512))
+                    val curFlags = ib.getInt(0x20)
+                    ib.putInt(0x20, curFlags or EXT4_EXTENTS_FL)
 
-                    if (targetExtents !== rec.extents && targetExtents.size <= 4) {
-                        ib.putShort(0x28, EXT4_EXTENT_MAGIC)
-                        ib.putShort(0x2A, targetExtents.size.toShort())
-                        ib.putShort(0x2C, 4.toShort())
-                        ib.putShort(0x2E, 0.toShort())
-                        ib.putInt(0x30, 0)
-                        for (i in targetExtents.indices) {
-                            val ext = targetExtents[i]
-                            val pos = 0x34 + i * 12
-                            ib.putInt(pos, ext.logicalBlock.toInt())
-                            ib.putShort(pos + 4, ext.blockCount.toShort())
-                            ib.putShort(pos + 6, ((ext.physicalBlock ushr 32) and 0xFFFFL).toShort())
-                            ib.putInt(pos + 8, (ext.physicalBlock and 0xFFFFFFFFL).toInt())
-                        }
+                    // Clear 60-byte block area and write updated extent tree
+                    for (bIdx in 0x28 until 0x64) rawIno[bIdx] = 0
+                    ib.putShort(0x28, EXT4_EXTENT_MAGIC)
+                    ib.putShort(0x2A, cowExtents.size.toShort())
+                    ib.putShort(0x2C, 4.toShort())
+                    ib.putShort(0x2E, 0.toShort())
+                    ib.putInt(0x30, 0)
+                    for (i in cowExtents.indices) {
+                        val ext = cowExtents[i]
+                        val pos = 0x34 + i * 12
+                        ib.putInt(pos, ext.logicalBlock.toInt())
+                        ib.putShort(pos + 4, ext.blockCount.toShort())
+                        ib.putShort(pos + 6, ((ext.physicalBlock ushr 32) and 0xFFFFL).toShort())
+                        ib.putInt(pos + 8, (ext.physicalBlock and 0xFFFFFFFFL).toInt())
                     }
 
                     raf.seek(inoOff)
                     raf.write(rawIno)
 
-                    val msg = "Patch In-Place (Inode #${rec.inodeNumber}) : '$modRel' (${newSize} octets) mis à jour sans toucher au reste du système."
-                    onLog("[RECORE-DELTA-INPLACE] $msg")
+                    val msg = "Patch CoW Sans Écrasement Partagé (Inode #${rec.inodeNumber}) : '$modRel' (${newSize} octets) mis à jour sur nouveaux blocs dédiés (SHARED_BLOCKS 100% protégés)."
+                    onLog("[RECORE-DELTA-COW] $msg")
                     details.add(msg)
                 }
 
                 // 3. Inject ADDED files (e.g. FOD Fix Solution 2 overlays, blobs, VINTF, SELinux CIL, init RC, R.E.C.O.R.E shims)
                 if (addedPaths.isNotEmpty()) {
-                    // Helper to read a directory inode's first data block and resolve or append a child entry
-                    fun readInodeFirstPhysicalBlock(inodeNum: Long): Pair<Long, ByteArray> {
-                        val off = getInodeOffset(inodeNum)
-                        val raw = ByteArray(inodeSize)
-                        raf.seek(off)
-                        raf.readFully(raw)
-                        val ib = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-                        val flags = ib.getInt(0x20)
-                        val usesExt = (flags and EXT4_EXTENTS_FL) != 0
-                        val physBlk = if (usesExt) {
-                            val ehMagic = ib.getShort(0x28).toInt() and 0xFFFF
-                            val ehDepth = ib.getShort(0x2E).toInt() and 0xFFFF
-                            if (ehMagic == 0xF30A && ehDepth == 0) {
-                                val hi = ib.getShort(0x34 + 6).toLong() and 0xFFFFL
-                                val lo = ib.getInt(0x34 + 8).toLong() and 0xFFFFFFFFL
-                                (hi shl 32) or lo
-                            } else 0L
-                        } else {
-                            ib.getInt(0x28).toLong() and 0xFFFFFFFFL
+                    // Collect all physical blocks of a directory inode (supporting both ehDepth == 0 and ehDepth == 1)
+                    fun getDirectoryPhysicalBlocks(rawIno: ByteArray): List<Long> {
+                        val ib = ByteBuffer.wrap(rawIno).order(ByteOrder.LITTLE_ENDIAN)
+                        val ehMagic = ib.getShort(0x28).toInt() and 0xFFFF
+                        val ehEntries = ib.getShort(0x2A).toInt() and 0xFFFF
+                        val ehDepth = ib.getShort(0x2E).toInt() and 0xFFFF
+                        if (ehMagic != 0xF30A) return emptyList()
+                        val blocks = mutableListOf<Long>()
+
+                        if (ehDepth == 0) {
+                            for (eIdx in 0 until ehEntries) {
+                                val ePos = 0x34 + eIdx * 12
+                                val blkCount = ib.getShort(ePos + 4).toInt() and 0xFFFF
+                                val hi = ib.getShort(ePos + 6).toLong() and 0xFFFFL
+                                val lo = ib.getInt(ePos + 8).toLong() and 0xFFFFFFFFL
+                                val startBlk = (hi shl 32) or lo
+                                for (b in 0 until blkCount) {
+                                    blocks.add(startBlk + b)
+                                }
+                            }
+                        } else if (ehDepth == 1) {
+                            for (iIdx in 0 until ehEntries) {
+                                val iPos = 0x34 + iIdx * 12
+                                val leafLo = ib.getInt(iPos + 4).toLong() and 0xFFFFFFFFL
+                                val leafHi = ib.getShort(iPos + 8).toLong() and 0xFFFFL
+                                val leafBlk = (leafHi shl 32) or leafLo
+                                if (leafBlk > 0L) {
+                                    val leafBytes = ByteArray(blockSize)
+                                    raf.seek(leafBlk * blockSize)
+                                    raf.readFully(leafBytes)
+                                    val lb = ByteBuffer.wrap(leafBytes).order(ByteOrder.LITTLE_ENDIAN)
+                                    val lMagic = lb.getShort(0).toInt() and 0xFFFF
+                                    val lEntries = lb.getShort(2).toInt() and 0xFFFF
+                                    if (lMagic == 0xF30A) {
+                                        for (eIdx in 0 until lEntries) {
+                                            val ePos = 12 + eIdx * 12
+                                            val blkCount = lb.getShort(ePos + 4).toInt() and 0xFFFF
+                                            val hi = lb.getShort(ePos + 6).toLong() and 0xFFFFL
+                                            val lo = lb.getInt(ePos + 8).toLong() and 0xFFFFFFFFL
+                                            val startBlk = (hi shl 32) or lo
+                                            for (b in 0 until blkCount) {
+                                                blocks.add(startBlk + b)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        return physBlk to raw
+                        return blocks
                     }
 
                     fun findChildInDirectory(dirInodeNum: Long, childName: String): Long {
@@ -662,35 +812,24 @@ object ExactImageCloneEngine {
                         val raw = ByteArray(inodeSize)
                         raf.seek(off)
                         raf.readFully(raw)
-                        val ib = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
-                        val ehMagic = ib.getShort(0x28).toInt() and 0xFFFF
-                        val ehEntries = ib.getShort(0x2A).toInt() and 0xFFFF
-                        val ehDepth = ib.getShort(0x2E).toInt() and 0xFFFF
-                        if (ehMagic != 0xF30A || ehDepth != 0) return -1L
+                        val dirBlocks = getDirectoryPhysicalBlocks(raw)
 
-                        for (eIdx in 0 until ehEntries) {
-                            val ePos = 0x34 + eIdx * 12
-                            val blkCount = ib.getShort(ePos + 4).toInt() and 0xFFFF
-                            val hi = ib.getShort(ePos + 6).toLong() and 0xFFFFL
-                            val lo = ib.getInt(ePos + 8).toLong() and 0xFFFFFFFFL
-                            val startBlk = (hi shl 32) or lo
-                            for (b in 0 until blkCount) {
-                                val dirBlkBytes = ByteArray(blockSize)
-                                raf.seek((startBlk + b) * blockSize)
-                                raf.readFully(dirBlkBytes)
-                                val db = ByteBuffer.wrap(dirBlkBytes).order(ByteOrder.LITTLE_ENDIAN)
-                                var pos = 0
-                                while (pos + 8 <= blockSize) {
-                                    val ino = db.getInt(pos).toLong() and 0xFFFFFFFFL
-                                    val recLen = db.getShort(pos + 4).toInt() and 0xFFFF
-                                    val nameLen = db.get(pos + 6).toInt() and 0xFF
-                                    if (recLen < 8 || pos + recLen > blockSize) break
-                                    if (ino > 0L && nameLen == childName.length && pos + 8 + nameLen <= blockSize) {
-                                        val name = String(dirBlkBytes, pos + 8, nameLen, Charsets.UTF_8)
-                                        if (name == childName) return ino
-                                    }
-                                    pos += recLen
+                        for (physBlk in dirBlocks) {
+                            val dirBlkBytes = ByteArray(blockSize)
+                            raf.seek(physBlk * blockSize)
+                            raf.readFully(dirBlkBytes)
+                            val db = ByteBuffer.wrap(dirBlkBytes).order(ByteOrder.LITTLE_ENDIAN)
+                            var pos = 0
+                            while (pos + 8 <= blockSize) {
+                                val ino = db.getInt(pos).toLong() and 0xFFFFFFFFL
+                                val recLen = db.getShort(pos + 4).toInt() and 0xFFFF
+                                val nameLen = db.get(pos + 6).toInt() and 0xFF
+                                if (recLen < 8 || pos + recLen > blockSize) break
+                                if (ino > 0L && nameLen == childName.length && pos + 8 + nameLen <= blockSize) {
+                                    val name = String(dirBlkBytes, pos + 8, nameLen, Charsets.UTF_8)
+                                    if (name == childName) return ino
                                 }
+                                pos += recLen
                             }
                         }
                         return -1L
@@ -709,17 +848,73 @@ object ExactImageCloneEngine {
 
                         val nameBytes = childName.toByteArray(Charsets.UTF_8)
                         val neededRecLen = (8 + nameBytes.size + 3) and -4
+                        val oldFlags = ib.getInt(0x20)
+                        val isHtreeIndexed = (oldFlags and 0x00001000) != 0
 
-                        // Try to split the Slack space of an existing directory entry in the directory's blocks
-                        for (eIdx in 0 until ehEntries) {
-                            val ePos = 0x34 + eIdx * 12
-                            val blkCount = ib.getShort(ePos + 4).toInt() and 0xFFFF
-                            val hi = ib.getShort(ePos + 6).toLong() and 0xFFFFL
-                            val lo = ib.getInt(ePos + 8).toLong() and 0xFFFFFFFFL
-                            val startBlk = (hi shl 32) or lo
+                        // If the directory is NOT HTree indexed (`EXT4_INDEX_FL` == 0), we can safely split slack space in-place
+                        if (!isHtreeIndexed) {
+                            for (eIdx in 0 until ehEntries) {
+                                val ePos = 0x34 + eIdx * 12
+                                val blkCount = ib.getShort(ePos + 4).toInt() and 0xFFFF
+                                val hi = ib.getShort(ePos + 6).toLong() and 0xFFFFL
+                                val lo = ib.getInt(ePos + 8).toLong() and 0xFFFFFFFFL
+                                val startBlk = (hi shl 32) or lo
 
-                            for (b in 0 until blkCount) {
-                                val physBlk = startBlk + b
+                                for (b in 0 until blkCount) {
+                                    val physBlk = startBlk + b
+                                    val dirBlkBytes = ByteArray(blockSize)
+                                    raf.seek(physBlk * blockSize)
+                                    raf.readFully(dirBlkBytes)
+                                    val db = ByteBuffer.wrap(dirBlkBytes).order(ByteOrder.LITTLE_ENDIAN)
+                                    var pos = 0
+                                    while (pos + 8 <= blockSize) {
+                                        val ino = db.getInt(pos).toLong() and 0xFFFFFFFFL
+                                        val recLen = db.getShort(pos + 4).toInt() and 0xFFFF
+                                        val nameLen = db.get(pos + 6).toInt() and 0xFF
+                                        val ft = db.get(pos + 7).toInt() and 0xFF
+                                        if (recLen < 8 || pos + recLen > blockSize) break
+
+                                        // Skip HTree tail / checksum pseudo-entry (inode == 0 && ft == 0xDE)
+                                        val actualUsed = if (ino == 0L && ft != 0xDE) 0 else ((8 + nameLen + 3) and -4)
+                                        val slack = recLen - actualUsed
+                                        if (ft != 0xDE && slack >= neededRecLen) {
+                                            if (actualUsed == 0) {
+                                                db.putInt(pos, childInodeNum.toInt())
+                                                db.putShort(pos + 4, recLen.toShort())
+                                                dirBlkBytes[pos + 6] = nameBytes.size.toByte()
+                                                dirBlkBytes[pos + 7] = fileType.toByte()
+                                                System.arraycopy(nameBytes, 0, dirBlkBytes, pos + 8, nameBytes.size)
+                                            } else {
+                                                db.putShort(pos + 4, actualUsed.toShort())
+                                                val newPos = pos + actualUsed
+                                                val newRecLen = recLen - actualUsed
+                                                db.putInt(newPos, childInodeNum.toInt())
+                                                db.putShort(newPos + 4, newRecLen.toShort())
+                                                dirBlkBytes[newPos + 6] = nameBytes.size.toByte()
+                                                dirBlkBytes[newPos + 7] = fileType.toByte()
+                                                System.arraycopy(nameBytes, 0, dirBlkBytes, newPos + 8, nameBytes.size)
+                                            }
+                                            if (fileType == 2) {
+                                                val links = (ib.getShort(0x1A).toInt() and 0xFFFF) + 1
+                                                ib.putShort(0x1A, links.toShort())
+                                                raf.seek(inoOff)
+                                                raf.write(rawIno)
+                                            }
+
+                                            raf.seek(physBlk * blockSize)
+                                            raf.write(dirBlkBytes)
+                                            return true
+                                        }
+                                        pos += recLen
+                                    }
+                                }
+                            }
+                        } else {
+                            // Directory had HTree index flag (`0x00001000`): rebuild clean linear directory blocks without dx_root pseudo-blocks
+                            // so clearing `EXT4_INDEX_FL` never exposes raw hash-tree index bytes to `ext4_readdir`!
+                            val existingEntries = mutableListOf<Triple<Long, Int, String>>()
+                            val dirBlocks = getDirectoryPhysicalBlocks(rawIno)
+                            for (physBlk in dirBlocks) {
                                 val dirBlkBytes = ByteArray(blockSize)
                                 raf.seek(physBlk * blockSize)
                                 raf.readFully(dirBlkBytes)
@@ -730,50 +925,90 @@ object ExactImageCloneEngine {
                                     val recLen = db.getShort(pos + 4).toInt() and 0xFFFF
                                     val nameLen = db.get(pos + 6).toInt() and 0xFF
                                     val ft = db.get(pos + 7).toInt() and 0xFF
-                                    if (recLen < 8 || pos + recLen > blockSize) break
-
-                                    // Skip HTree tail / checksum pseudo-entry (inode == 0 && ft == 0xDE)
-                                    val actualUsed = if (ino == 0L && ft != 0xDE) 0 else ((8 + nameLen + 3) and -4)
-                                    val slack = recLen - actualUsed
-                                    if (ft != 0xDE && slack >= neededRecLen) {
-                                        if (actualUsed == 0) {
-                                            // Reuse unused entry slot directly
-                                            db.putInt(pos, childInodeNum.toInt())
-                                            db.putShort(pos + 4, recLen.toShort())
-                                            dirBlkBytes[pos + 6] = nameBytes.size.toByte()
-                                            dirBlkBytes[pos + 7] = fileType.toByte()
-                                            System.arraycopy(nameBytes, 0, dirBlkBytes, pos + 8, nameBytes.size)
-                                        } else {
-                                            // Shrink current entry to actualUsed and place new entry in the remaining slack
-                                            db.putShort(pos + 4, actualUsed.toShort())
-                                            val newPos = pos + actualUsed
-                                            val newRecLen = recLen - actualUsed
-                                            db.putInt(newPos, childInodeNum.toInt())
-                                            db.putShort(newPos + 4, newRecLen.toShort())
-                                            dirBlkBytes[newPos + 6] = nameBytes.size.toByte()
-                                            dirBlkBytes[newPos + 7] = fileType.toByte()
-                                            System.arraycopy(nameBytes, 0, dirBlkBytes, newPos + 8, nameBytes.size)
+                                    if (recLen < 8 || (recLen % 4 != 0) || pos + recLen > blockSize) break
+                                    if (ino in 1L..inodesCount && ft in 1..7 && nameLen in 1..255 && pos + 8 + nameLen <= blockSize) {
+                                        val entryName = String(dirBlkBytes, pos + 8, nameLen, Charsets.UTF_8)
+                                        if (entryName.all { ch -> ch.code in 32..126 || ch.code > 160 } &&
+                                            existingEntries.none { it.third == entryName }
+                                        ) {
+                                            existingEntries.add(Triple(ino, ft, entryName))
                                         }
-                                        // Clear HTree index flag (0x00001000) on parent directory so kernel reads linear entries cleanly
-                                        val oldFlags = ib.getInt(0x20)
-                                        ib.putInt(0x20, oldFlags and 0x00001000.inv())
-                                        if (fileType == 2) {
-                                            val links = (ib.getShort(0x1A).toInt() and 0xFFFF) + 1
-                                            ib.putShort(0x1A, links.toShort())
-                                        }
-                                        raf.seek(inoOff)
-                                        raf.write(rawIno)
-
-                                        raf.seek(physBlk * blockSize)
-                                        raf.write(dirBlkBytes)
-                                        return true
                                     }
                                     pos += recLen
                                 }
                             }
+                            existingEntries.add(Triple(childInodeNum, fileType, childName))
+
+                            // Pack all entries into clean 4096B linear directory blocks
+                            val outDirBlks = ByteArrayOutputStream()
+                            var curBlk = ByteArray(blockSize)
+                            var curBb = ByteBuffer.wrap(curBlk).order(ByteOrder.LITTLE_ENDIAN)
+                            var curOff = 0
+                            var prevEntryOff = 0
+
+                            for ((eIno, eFt, eName) in existingEntries) {
+                                val nb = eName.toByteArray(Charsets.UTF_8)
+                                val rLen = (8 + nb.size + 3) and -4
+                                if (curOff + rLen > blockSize) {
+                                    curBb.putShort(prevEntryOff + 4, (blockSize - prevEntryOff).toShort())
+                                    outDirBlks.write(curBlk)
+                                    curBlk = ByteArray(blockSize)
+                                    curBb = ByteBuffer.wrap(curBlk).order(ByteOrder.LITTLE_ENDIAN)
+                                    curOff = 0
+                                    prevEntryOff = 0
+                                }
+                                curBb.putInt(curOff, eIno.toInt())
+                                curBb.putShort(curOff + 4, rLen.toShort())
+                                curBlk[curOff + 6] = nb.size.toByte()
+                                curBlk[curOff + 7] = eFt.toByte()
+                                System.arraycopy(nb, 0, curBlk, curOff + 8, nb.size)
+                                prevEntryOff = curOff
+                                curOff += rLen
+                            }
+                            curBb.putShort(prevEntryOff + 4, (blockSize - prevEntryOff).toShort())
+                            outDirBlks.write(curBlk)
+                            val linearBytes = outDirBlks.toByteArray()
+                            val neededDirBlks = (linearBytes.size + blockSize - 1) / blockSize
+                            val newDirExts = allocateFreeBlocks(neededDirBlks)
+                            if (newDirExts.isEmpty() || newDirExts.size > 4) return false
+
+                            var byteCur = 0
+                            for (ext in newDirExts) {
+                                val len = min(ext.blockCount * blockSize, linearBytes.size - byteCur)
+                                if (len > 0) {
+                                    raf.seek(ext.physicalBlock * blockSize)
+                                    raf.write(linearBytes, byteCur, len)
+                                    byteCur += len
+                                }
+                            }
+
+                            for (bIdx in 0x28 until 0x64) rawIno[bIdx] = 0
+                            ib.putShort(0x28, EXT4_EXTENT_MAGIC)
+                            ib.putShort(0x2A, newDirExts.size.toShort())
+                            ib.putShort(0x2C, 4.toShort())
+                            ib.putShort(0x2E, 0.toShort())
+                            ib.putInt(0x30, 0)
+                            for (i in newDirExts.indices) {
+                                val ext = newDirExts[i]
+                                val pos = 0x34 + i * 12
+                                ib.putInt(pos, ext.logicalBlock.toInt())
+                                ib.putShort(pos + 4, ext.blockCount.toShort())
+                                ib.putShort(pos + 6, ((ext.physicalBlock ushr 32) and 0xFFFFL).toShort())
+                                ib.putInt(pos + 8, (ext.physicalBlock and 0xFFFFFFFFL).toInt())
+                            }
+                            ib.putInt(0x04, linearBytes.size)
+                            ib.putInt(0x1C, neededDirBlks * (blockSize / 512))
+                            ib.putInt(0x20, (oldFlags and 0x00001000.inv()) or EXT4_EXTENTS_FL)
+                            if (fileType == 2) {
+                                val links = (ib.getShort(0x1A).toInt() and 0xFFFF) + 1
+                                ib.putShort(0x1A, links.toShort())
+                            }
+                            raf.seek(inoOff)
+                            raf.write(rawIno)
+                            return true
                         }
 
-                        // If existing directory blocks are full and ehEntries < 4, allocate 1 new directory block
+                        // If existing linear directory blocks are full and ehEntries < 4, allocate 1 new directory block
                         if (ehEntries < 4) {
                             val newBlkExt = allocateFreeBlocks(1).firstOrNull() ?: return false
                             val newDirBlk = ByteArray(blockSize)
@@ -797,8 +1032,6 @@ object ExactImageCloneEngine {
                             ib.putInt(0x04, (oldDirSize + blockSize).toInt())
                             val oldSectors = ib.getInt(0x1C)
                             ib.putInt(0x1C, oldSectors + (blockSize / 512))
-                            val oldFlags = ib.getInt(0x20)
-                            ib.putInt(0x20, oldFlags and 0x00001000.inv())
 
                             raf.seek(inoOff)
                             raf.write(rawIno)
@@ -807,6 +1040,11 @@ object ExactImageCloneEngine {
                         return false
                     }
 
+                    // Read root inode #2 as a canonical template for `i_extra_isize` and `ext4_xattr_ibody_header`
+                    val rootInodeTemplate = ByteArray(inodeSize)
+                    raf.seek(getInodeOffset(2L))
+                    raf.readFully(rootInodeTemplate)
+
                     fun buildFreshInodeBytes(
                         mode: Int,
                         uid: Int,
@@ -814,7 +1052,8 @@ object ExactImageCloneEngine {
                         sizeBytes: Long,
                         extents: List<RecordedExtent>,
                         selinuxContext: String,
-                        isDir: Boolean
+                        isDir: Boolean,
+                        templateInodeBytes: ByteArray = rootInodeTemplate
                     ): ByteArray {
                         val raw = ByteArray(inodeSize)
                         val ib = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
@@ -850,23 +1089,30 @@ object ExactImageCloneEngine {
                         }
 
                         if (inodeSize >= 256) {
-                            ib.putShort(0x80, 32.toShort())
-                            val xattrStart = 160
-                            ib.putInt(xattrStart, EXT4_XATTR_MAGIC)
-                            val areaBase = xattrStart + 4
-                            val areaLen = inodeSize - areaBase
-                            val selinuxName = "selinux".toByteArray(Charsets.UTF_8)
-                            val selinuxVal = (selinuxContext + "\u0000").toByteArray(Charsets.UTF_8)
-                            val alignedValLen = (selinuxVal.size + 3) and -4
-                            val valOff = areaLen - alignedValLen
-                            if (valOff >= 24) {
-                                raw[areaBase] = selinuxName.size.toByte()
-                                raw[areaBase + 1] = 6.toByte()
-                                ib.putShort(areaBase + 2, valOff.toShort())
-                                ib.putInt(areaBase + 4, 0)
-                                ib.putInt(areaBase + 8, selinuxVal.size)
-                                System.arraycopy(selinuxName, 0, raw, areaBase + 16, selinuxName.size)
-                                System.arraycopy(selinuxVal, 0, raw, areaBase + valOff, selinuxVal.size)
+                            // First copy the exact extra_isize and xattr body from the template inode if it has valid EXT4_XATTR_MAGIC
+                            val tb = ByteBuffer.wrap(templateInodeBytes).order(ByteOrder.LITTLE_ENDIAN)
+                            val tplExtra = (tb.getShort(0x80).toInt() and 0xFFFF).let { if (it in 4..128) it else 32 }
+                            ib.putShort(0x80, tplExtra.toShort())
+                            val xattrHeaderOff = 128 + tplExtra
+                            if (xattrHeaderOff + 28 <= inodeSize) {
+                                ib.putInt(xattrHeaderOff, EXT4_XATTR_MAGIC)
+                                val firstEntryOff = xattrHeaderOff + 4 // In Linux kernel ext4, e_value_offs is relative to firstEntryOff (IFIRST(header))!
+                                val areaLen = inodeSize - firstEntryOff
+                                val selinuxName = "selinux".toByteArray(Charsets.UTF_8)
+                                val selinuxVal = (selinuxContext + "\u0000").toByteArray(Charsets.UTF_8)
+                                val alignedValLen = (selinuxVal.size + 3) and -4
+                                val valOff = areaLen - alignedValLen
+                                // Entry header is 16 bytes + 8 bytes ("selinux" padded to 4-byte boundary) + 4 bytes zero terminator = 28 bytes
+                                if (valOff >= 28) {
+                                    raw[firstEntryOff] = selinuxName.size.toByte() // e_name_len = 7
+                                    raw[firstEntryOff + 1] = 6.toByte() // EXT4_XATTR_INDEX_SECURITY = 6
+                                    ib.putShort(firstEntryOff + 2, valOff.toShort()) // e_value_offs relative to firstEntryOff!
+                                    ib.putInt(firstEntryOff + 4, 0) // e_value_inum = 0
+                                    ib.putInt(firstEntryOff + 8, selinuxVal.size) // e_value_size (includes trailing NUL)
+                                    ib.putInt(firstEntryOff + 12, 0) // e_hash = 0
+                                    System.arraycopy(selinuxName, 0, raw, firstEntryOff + 16, selinuxName.size)
+                                    System.arraycopy(selinuxVal, 0, raw, firstEntryOff + valOff, selinuxVal.size)
+                                }
                             }
                         }
                         return raw

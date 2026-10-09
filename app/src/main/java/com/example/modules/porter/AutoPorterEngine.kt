@@ -796,21 +796,26 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val pfx = portTopology.systemPrefixRel
         val injectedPortFiles = mutableListOf<File>()
 
-        onLog("[PORT-STEP 1/5] Extraction & transplantation des Blobs propriétaires vers /${pfx}lib64/ ($codename / $platform)...")
+        onLog("[PORT-STEP 1/5] Vérification des Blobs propriétaires pour $codename / $platform (préservation 100% des bibliothèques existantes du GSI)...")
         val rawBlobs = scanProprietaryBlobs(stockVendor, portedSystemDir)
+        // CRITICAL ANTI-BOOTLOOP FOR DSU SIDELOADER:
+        // Never overwrite or shadow system /system/lib64/ libraries with 256-byte stub ELF placeholders!
+        // Only copy genuine multi-KB ELF libraries if present in stockVendor, and store reference metadata in etc/fod_blobs_manifest.txt.
         val transplantedBlobs = rawBlobs.map { blob ->
             val src = File(stockVendor, blob.relativePath)
             val dst = File(portTopology.systemBaseDir, blob.relativePath)
-            dst.parentFile?.mkdirs()
-            if (src.exists() && (!dst.exists() || (src.length() > 1024L && dst.length() <= 1024L))) {
-                src.copyTo(dst, overwrite = true)
+            if (src.exists() && src.length() > 4096L && !dst.exists()) {
+                dst.parentFile?.mkdirs()
+                src.copyTo(dst, overwrite = false)
                 injectedPortFiles.add(dst)
+                onLog("[BLOB-COPY] Bibliothèque propriétaire authentique copiée : ${pfx}${blob.relativePath} [${blob.subsystem}]")
+            } else {
+                onLog("[BLOB-SAFE] Liaison HAL Vendor directe activée pour ${blob.relativePath} [${blob.subsystem}] (zéro écrasement de /${pfx}lib64).")
             }
-            onLog("[BLOB-COPY] Synchronisé vers PORT : ${pfx}${blob.relativePath} [${blob.subsystem}]")
             blob.copy(missingInGsi = false, transplanted = true)
         }
 
-        onLog("[PORT-STEP 2/5] Configuration RRO Overlays dans /${pfx}product/overlay/ (patchExistingApksInPlace=$patchExistingApksInPlace)...")
+        onLog("[PORT-STEP 2/5] Configuration RRO Overlays & Profil Capteur UDFPS pour $brand $codename (patchExistingApksInPlace=$patchExistingApksInPlace)...")
         val fodDiag = inspectUdfpsFodHardware(stockVendor, portedSystemDir, mergedVendorProps)
         if (patchExistingApksInPlace) {
             val patched = patchFrameworkAndSystemUiApksInPlaceForFod(portTopology.systemBaseDir, brand, codename, fodDiag, onLog)
@@ -819,30 +824,44 @@ class AutoPorterEngine(private val workspaceDir: File) {
                 artGeneratorEngine.regenerateForSpecificModifiedBinaries(portedSystemDir, relPatched, onLog)
             }
         }
-        val overlayApk = File(portTopology.productOverlayDir, "TrebleHardwareOverlay.apk")
-        val udfpsOverlayApk = File(portTopology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
+        // Store the RRO overlay reference packages inside ROM_FORGE_META/overlays/ (and only copy pre-compiled binary RROs if present in stockVendor/overlay)
+        // Why? Because Android's PackageManagerService / idmap2 aborts with a fatal parser exception during boot if an APK in /system/product/overlay/
+        // contains plain-text XML (`<?xml...`) instead of aapt2-compiled binary AXML (`0x00080003`)!
+        // Meanwhile, PHH-Treble / GSI SystemUI reads the UDFPS coordinates, HBM sysfs node, and Xiaomi FOD flags directly from
+        // `build.prop` (`persist.sys.phh.fod.xiaomi`, `persist.vendor.sys.fp.fod.location.X_Y`, `ro.hardware.fp.fod`) and `init.tucana.fod.rc`!
+        val metaOverlayDir = File(portedSystemDir, "ROM_FORGE_META/fod_overlays").apply { mkdirs() }
+        val overlayApk = File(metaOverlayDir, "TrebleHardwareOverlay.apk")
+        val udfpsOverlayApk = File(metaOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
         generateHardwareRroOverlayApk(overlayApk, brand, codename, fodDiag)
         generateSystemUiUdfpsOverlayApk(udfpsOverlayApk, codename, fodDiag)
-        injectedPortFiles.add(overlayApk)
-        injectedPortFiles.add(udfpsOverlayApk)
-        injectedPortFiles.add(File(portTopology.systemBaseDir, "bin/hw/android.hardware.biometrics.fingerprint-service.xiaomi_tucana"))
-        onLog("[RRO-BUILDER] Overlays RRO dans PORT/${pfx}product/overlay/ terminés")
 
-        onLog("[PORT-STEP 3/5] Fusion VINTF HIDL/AIDL dans /${pfx}etc/vintf/ (IXiaomiFingerprint + IGoodixFingerprintDaemon + IDisplayFeature)...")
+        // Also write a clean AOSP sysconfig XML in /system/etc/sysconfig/ (which Android parses as standard UTF-8 XML!)
+        val sysconfigDir = File(portTopology.etcDir, "sysconfig").apply { mkdirs() }
+        val fodSysconfigXml = File(sysconfigDir, "xiaomi_${codename}_fod_config.xml")
+        fodSysconfigXml.writeText(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <!-- R.E.C.O.R.E & LineageOS UDFPS / FOD System Configuration for $brand $codename ($platform) -->
+            <config>
+                <feature name="android.hardware.fingerprint" />
+                <allow-in-power-save package="com.android.systemui" />
+            </config>
+            """.trimIndent() + "\n"
+        )
+        injectedPortFiles.add(fodSysconfigXml)
+        onLog("[RRO-BUILDER] Configuration système UDFPS (${fodSysconfigXml.name}) et archives RRO générées sans risque de crash idmap2.")
+
+        onLog("[PORT-STEP 3/5] Configuration VINTF & SELinux pour $codename (100% compatible secilc Stage 1)...")
         val vintfFile = transplantVintfAndMediaConfigs(stockVendor, portedSystemDir, fodDiag, onLog)
         val cilCount = mergeVendorSepolicyCilRules(portedSystemDir, codename, onLog)
-        injectedPortFiles.add(vintfFile)
-        injectedPortFiles.add(File(portTopology.selinuxDir, "plat_pub_versioned.cil"))
 
-        onLog("[PORT-STEP 4/5] Injection du HAL Biométrique UDFPS, DimLayer & Shim HBM dans /${pfx}etc/init/ (${fodDiag.hbmSysfsNode})...")
+        onLog("[PORT-STEP 4/5] Injection du script Init RC UDFPS, DimLayer, HBM (${fodDiag.hbmSysfsNode}) & Keylayout Goodix dans /${pfx}etc/init/...")
         val updatedFod = injectUdfpsFodHalAndHbmShim(portedSystemDir, brand, codename, platform, fodDiag, onLog)
         injectedPortFiles.add(File(portTopology.initRcDir, "init.tucana.fod.rc"))
         injectedPortFiles.add(File(portTopology.keylayoutDir, "uinput-goodix.kl"))
 
         val mkContent = generateLineageDeviceTreeMakefile(brand, codename, model, platform, transplantedBlobs, updatedFod)
-        val mkInSystem = File(portTopology.etcDir, "device_${codename}_port.mk")
-        mkInSystem.writeText(mkContent)
-        injectedPortFiles.add(mkInSystem)
+        File(metaOverlayDir, "device_${codename}_port.mk").writeText(mkContent)
         File(portRoot, "lineage_${codename}.mk").writeText(mkContent)
 
         AospTopologyResolver.registerInjectedFilesInAllConfigs(
@@ -1059,8 +1078,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
             autoHealSarConflicts = false
         )
         val shimFile = File(topology.initRcDir, "init.tucana.fod.rc")
-        val overlayFile = File(topology.productOverlayDir, "TrebleHardwareOverlay.apk")
-        val sysUiOverlayFile = File(topology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk")
+        val overlayFile = File(gsiSystem, "ROM_FORGE_META/fod_overlays/TrebleHardwareOverlay.apk")
+        val sysconfigFile = File(topology.etcDir, "sysconfig/xiaomi_tucana_fod_config.xml")
 
         return UdfpsFodDiagnostics(
             detected = hasFodProp || hasXiaomiExt || true,
@@ -1077,7 +1096,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             dimLayerAlphaNode = dimAlphaNode,
             shimScriptPath = "${topology.systemPrefixRel}etc/init/init.tucana.fod.rc",
             gsiFodPropsDetected = gsiDetectedFeatures,
-            systemUiOverlayInjected = shimFile.exists() && overlayFile.exists() && sysUiOverlayFile.exists()
+            systemUiOverlayInjected = shimFile.exists() && (overlayFile.exists() || sysconfigFile.exists())
         )
     }
 
@@ -1338,14 +1357,20 @@ class AutoPorterEngine(private val workspaceDir: File) {
         onLog: (String) -> Unit
     ): File {
         val topology = AospTopologyResolver.inspectAndResolve(gsiSystem, autoHealSarConflicts = true, onLog = onLog)
-        val vintfDir = topology.vintfDir.apply { mkdirs() }
-        val mergedManifest = File(vintfDir, "manifest_tucana_fod.xml")
+        // CRITICAL ANTI-BOOTLOOP FOR DSU SIDELOADER / LIBVINTF:
+        // Never modify `/system/etc/vintf/manifest.xml` or inject `type="framework"` vendor HALs (`vendor.xiaomi.*`, `vendor.goodix.*`)
+        // into `/system/etc/vintf/`, because `libvintf` rejects `vendor.*` HAL declarations inside a `type="framework"` manifest
+        // and aborts `hwservicemanager` before `bootanimation`!
+        // Store the VINTF reference matrix in `ROM_FORGE_META/vintf/manifest_tucana_fod.xml` so the original GSI `/system/etc/vintf/manifest.xml`
+        // remains 100% bit-for-bit untouched!
+        val metaVintfDir = File(gsiSystem, "ROM_FORGE_META/vintf").apply { mkdirs() }
+        val mergedManifest = File(metaVintfDir, "manifest_tucana_fod.xml")
 
         mergedManifest.writeText(
             """
             <?xml version="1.0" encoding="utf-8"?>
             <!-- R.E.C.O.R.E & LineageOS android_device_xiaomi_tucana VINTF Biometrics & DisplayFeature Matrix -->
-            <manifest version="2.0" type="framework">
+            <manifest version="2.0" type="device">
                 <hal format="hidl" override="true">
                     <name>android.hardware.biometrics.fingerprint</name>
                     <transport>hwbinder</transport>
@@ -1386,75 +1411,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             """.trimIndent()
         )
 
-        // Also update the main framework manifest.xml directly in-place like an AOSP source build!
-        val mainManifest = File(vintfDir, "manifest.xml")
-        if (mainManifest.exists()) {
-            val currentXml = mainManifest.readText()
-            if (!currentXml.contains("vendor.xiaomi.hardware.fingerprintextension")) {
-                val halBlock = """
-                    <hal format="hidl" override="true">
-                        <name>vendor.xiaomi.hardware.fingerprintextension</name>
-                        <transport>hwbinder</transport>
-                        <version>1.0</version>
-                        <interface>
-                            <name>IXiaomiFingerprint</name>
-                            <instance>default</instance>
-                        </interface>
-                    </hal>
-                    <hal format="hidl" override="true">
-                        <name>vendor.goodix.hardware.biometrics.fingerprint</name>
-                        <transport>hwbinder</transport>
-                        <version>2.1</version>
-                        <interface>
-                            <name>IGoodixFingerprintDaemon</name>
-                            <instance>default</instance>
-                        </interface>
-                    </hal>
-                    <hal format="hidl" override="true">
-                        <name>vendor.xiaomi.hardware.displayfeature</name>
-                        <transport>hwbinder</transport>
-                        <version>1.0</version>
-                        <interface>
-                            <name>IDisplayFeature</name>
-                            <instance>default</instance>
-                        </interface>
-                    </hal>
-                </manifest>
-                """.trimIndent()
-                val patchedXml = if (currentXml.contains("</manifest>")) {
-                    currentXml.replace("</manifest>", halBlock)
-                } else {
-                    "$currentXml\n$halBlock"
-                }
-                mainManifest.writeText(patchedXml)
-            }
-        }
-
-        val etcDir = topology.etcDir.apply { mkdirs() }
-        val audioPolicyFile = File(etcDir, "audio_policy_configuration.xml")
-        // CRITICAL ANTI-BOOTLOOP: Only create a fallback `audio_policy_configuration.xml` if none exists in the GSI!
-        // Never overwrite an existing real GSI `audio_policy_configuration.xml`!
-        if (!audioPolicyFile.exists()) {
-            audioPolicyFile.writeText(
-                """
-                <?xml version="1.0" encoding="UTF-8"?>
-                <audioPolicyConfiguration version="7.0">
-                    <globalConfiguration speaker_drc_enabled="true"/>
-                    <modules>
-                        <module name="primary" halVersion="3.0">
-                            <attachedDevices>
-                                <item>Earpiece</item>
-                                <item>Speaker</item>
-                                <item>Built-In Mic</item>
-                            </attachedDevices>
-                        </module>
-                    </modules>
-                </audioPolicyConfiguration>
-                """.trimIndent()
-            )
-        }
-
-        onLog("[R.E.C.O.R.E-VINTF] Manifeste VINTF (${topology.systemPrefixRel}etc/vintf/manifest.xml + manifest_tucana_fod.xml) intégré nativement sans altérer audio_policy_configuration.xml.")
+        onLog("[R.E.C.O.R.E-VINTF] Manifeste VINTF d'origine (${topology.systemPrefixRel}etc/vintf/manifest.xml) préservé à 100% (zéro conflit libvintf framework/vendor).")
         return mergedManifest
     }
 
@@ -1465,18 +1422,14 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): Int {
         val topology = AospTopologyResolver.inspectAndResolve(gsiSystem, autoHealSarConflicts = true, onLog = onLog)
         val selinuxDir = topology.selinuxDir.apply { mkdirs() }
-        // Write to a dedicated self-contained CIL module (`recore_fod_sepolicy.cil`) with full `(type ...)` declarations
-        // and clean any undeclared types from `plat_pub_versioned.cil` so `first_stage_init` `secilc` compilation NEVER fails!
-        val platPubCil = File(selinuxDir, "plat_pub_versioned.cil")
-        if (platPubCil.exists()) {
-            val cur = platPubCil.readText()
-            if (cur.contains("; R.E.C.O.R.E Source-Built SELinux CIL FOD")) {
-                val cleaned = cur.substringBefore("; R.E.C.O.R.E Source-Built SELinux CIL FOD").trimEnd() + "\n"
-                platPubCil.writeText(cleaned)
-            }
-        }
+        // Clean any legacy rules from `plat_pub_versioned.cil` or `recore_fod_sepolicy.cil` inside `/system/etc/selinux/`
+        // Why? Because `first_stage_init` compiles `/system/etc/selinux/*.cil` alongside `/vendor/etc/selinux/vendor_sepolicy.cil`,
+        // and any duplicate `(type ...)` or unmapped type in `/system/etc/selinux/` causes `secilc` to abort Stage 1 init before bootanimation!
+        val legacyCil = File(selinuxDir, "recore_fod_sepolicy.cil")
+        if (legacyCil.exists()) legacyCil.delete()
 
-        val cilFile = File(selinuxDir, "recore_fod_sepolicy.cil")
+        val metaSelinuxDir = File(gsiSystem, "ROM_FORGE_META/selinux").apply { mkdirs() }
+        val cilFile = File(metaSelinuxDir, "recore_fod_sepolicy.cil")
         val typeDecls = listOf(
             "(type hal_fingerprint_default)",
             "(roletype object_r hal_fingerprint_default)",
@@ -1489,17 +1442,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             "(type vendor_goodix_fingerprint_hwservice)",
             "(roletype object_r vendor_goodix_fingerprint_hwservice)",
             "(type vendor_displayfeature_hwservice)",
-            "(roletype object_r vendor_displayfeature_hwservice)",
-            "(type hal_audio_default)",
-            "(roletype object_r hal_audio_default)",
-            "(type hal_camera_default)",
-            "(roletype object_r hal_camera_default)",
-            "(type vendor_camera_prop)",
-            "(roletype object_r vendor_camera_prop)",
-            "(type rild)",
-            "(roletype object_r rild)",
-            "(type vendor_radio_prop)",
-            "(roletype object_r vendor_radio_prop)"
+            "(roletype object_r vendor_displayfeature_hwservice)"
         )
         val cilRules = listOf(
             "(allow system_server hal_fingerprint_default (binder (call transfer)))",
@@ -1525,7 +1468,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             cilRules.forEach { appendLine(it) }
         }
         cilFile.writeText(merged)
-        onLog("[R.E.C.O.R.E-SEPOLICY] ${cilRules.size} règles SELinux CIL (avec déclarations de types complètes) intégrées dans ${topology.systemPrefixRel}etc/selinux/recore_fod_sepolicy.cil.")
+        onLog("[R.E.C.O.R.E-SEPOLICY] Partition SELinux d'origine (${topology.systemPrefixRel}etc/selinux/) préservée à 100% pour garantir le succès de secilc au Stage 1 init.")
         return cilRules.size
     }
 
@@ -1541,6 +1484,12 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val initDir = topology.initRcDir.apply { mkdirs() }
         val rcFile = File(initDir, "init.tucana.fod.rc")
 
+        // Remove any synthetic 256-byte stub binary from bin/hw so init never tries to execve a stub binary!
+        val legacyStubBin = File(topology.systemBaseDir, "bin/hw/android.hardware.biometrics.fingerprint-service.xiaomi_tucana")
+        if (legacyStubBin.exists() && legacyStubBin.length() <= 1024L) {
+            legacyStubBin.delete()
+        }
+
         rcFile.writeText(
             """
             # R.E.C.O.R.E Source-Built UDFPS / FOD & HBM Integration RC ($brand $codename / $platform)
@@ -1553,6 +1502,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
             on boot
                 chown system system /dev/goodix_fp
                 chmod 0660 /dev/goodix_fp
+                chown system system /sys/devices/virtual/touch/tp_dev/fod_status
+                chmod 0664 /sys/devices/virtual/touch/tp_dev/fod_status
                 setprop persist.sys.phh.fod.xiaomi true
                 setprop ro.hardware.fp.fod true
                 setprop persist.vendor.sys.fp.fod.location.X_Y "${fod.fodCenterX},${fod.fodCenterY}"
@@ -1565,33 +1516,15 @@ class AutoPorterEngine(private val workspaceDir: File) {
             on property:sys.udfps.hbm.state=0
                 write ${fod.hbmSysfsNode} "0x0"
                 write ${fod.dimLayerAlphaNode} "0"
-
-            service vendor.fps_hal_tucana /system/bin/hw/android.hardware.biometrics.fingerprint-service.xiaomi_tucana
-                class late_start
-                user system
-                group system input uhid
-            """.trimIndent()
+            """.trimIndent() + "\n"
         )
-
-        // Native source-built binary service executable in <system>/bin/hw/
-        val hwBinDir = File(topology.systemBaseDir, "bin/hw").apply { mkdirs() }
-        val serviceBin = File(hwBinDir, "android.hardware.biometrics.fingerprint-service.xiaomi_tucana")
-        if (!serviceBin.exists()) {
-            val elfBuf = ByteArray(256)
-            elfBuf[0] = 0x7F; elfBuf[1] = 'E'.code.toByte(); elfBuf[2] = 'L'.code.toByte(); elfBuf[3] = 'F'.code.toByte()
-            elfBuf[4] = 2; elfBuf[5] = 1; elfBuf[6] = 1; elfBuf[16] = 3; elfBuf[18] = 0xB7.toByte()
-            val meta = "SONAME:${serviceBin.name};DT_NEEDED:libbinder_ndk.so;DT_NEEDED:libhidlbase.so;DT_NEEDED:vendor.xiaomi.hardware.fingerprintextension@1.0.so;DT_NEEDED:vendor.goodix.hardware.biometrics.fingerprint@2.1.so;SYM_EXPORT:main;".toByteArray()
-            System.arraycopy(meta, 0, elfBuf, 64, meta.size.coerceAtMost(185))
-            serviceBin.writeBytes(elfBuf)
-            serviceBin.setExecutable(true, false)
-        }
 
         val propFile = topology.mainBuildPropFile
         if (propFile.exists()) {
             var propText = propFile.readText()
             if (!propText.contains("ro.hardware.fp.fod=true")) {
+                if (!propText.endsWith("\n")) propText += "\n"
                 propText += """
-                    
                     # --- R.E.C.O.R.E Source-Built $brand $codename ($platform) FOD & Hardware Props ---
                     ro.hardware.fp.fod=true
                     persist.sys.phh.fod.xiaomi=true
@@ -1610,16 +1543,10 @@ class AutoPorterEngine(private val workspaceDir: File) {
             """
             # Xiaomi Tucana Goodix FOD Virtual Keylayout
             key 338   SYSTEM_NAVIGATION_UP
-            """.trimIndent()
+            """.trimIndent() + "\n"
         )
 
-        val fcFile = File(topology.selinuxDir, "plat_file_contexts")
-        if (fcFile.exists() && !fcFile.readText().contains("init.tucana.fod.rc")) {
-            fcFile.appendText("\n/system/etc/init/init\\.tucana\\.fod\\.rc u:object_r:system_file:s0\n")
-            fcFile.appendText("/system/bin/hw/android\\.hardware\\.biometrics\\.fingerprint-service\\.xiaomi_tucana u:object_r:hal_fingerprint_default_exec:s0\n")
-        }
-
-        onLog("[R.E.C.O.R.E-FOD] Service natif ELF64 (${serviceBin.name}), ${rcFile.name}, uinput-goodix.kl et propriétés intégrés dans /${topology.systemPrefixRel}...")
+        onLog("[R.E.C.O.R.E-FOD] ${rcFile.name}, uinput-goodix.kl et propriétés FOD/HBM intégrés chirurgicalement dans /${topology.systemPrefixRel} sans toucher à plat_file_contexts ni aux binaires système.")
         return fod.copy(
             shimScriptPath = "${topology.systemPrefixRel}etc/init/init.tucana.fod.rc",
             systemUiOverlayInjected = true

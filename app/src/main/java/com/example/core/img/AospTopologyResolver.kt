@@ -282,12 +282,15 @@ object AospTopologyResolver {
         ukaFsFile.writeText(ukaFsLines.distinct().joinToString("\n") + "\n")
         ukaFcFile.writeText(ukaFcLines.distinct().joinToString("\n") + "\n")
         metaFsFile.writeText(metaFsLines.distinct().joinToString("\n") + "\n")
-        if (platFcFile.parentFile?.exists() == true) {
+        // CRITICAL ANTI-BOOTLOOP FOR DSU SIDELOADER:
+        // Never overwrite `platFcFile` (`/system/etc/selinux/plat_file_contexts`) if it already exists in the unpacked GSI!
+        // Only write a fallback `plat_file_contexts` if none existed in the extracted image.
+        if (!platFcFile.exists() && platFcFile.parentFile?.exists() == true) {
             platFcFile.writeText(platFcLines.distinct().joinToString("\n") + "\n")
         }
 
         onLog?.invoke(
-            "[TOPOLOGY-SYNC] ${injectedFiles.size} fichier(s) enregistré(s) dans ${topology.systemPrefixRel}... + config/system_fs_config & system_file_contexts."
+            "[TOPOLOGY-SYNC] ${injectedFiles.size} fichier(s) enregistré(s) dans config/system_fs_config & system_file_contexts (plat_file_contexts d'origine 100% préservé)."
         )
     }
 

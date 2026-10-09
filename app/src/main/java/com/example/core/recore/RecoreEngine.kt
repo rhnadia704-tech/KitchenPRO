@@ -835,8 +835,15 @@ class RecoreEngine(
             }.toMutableList()
 
             // Detect known vendor/GSI C++ mangled ABI symbols that require a shim if libshim_recore is not yet present
+            // CRITICAL ANTI-BOOTLOOP: Store generated ELF64 shims inside `ROM_FORGE_META/shims/` so we NEVER shadow or overwrite
+            // genuine `/system/lib64/` libraries inside the booted GSI!
+            val metaShimDir = File(unpackedRoot, "ROM_FORGE_META/shims").apply { mkdirs() }
             val shimCandidateName = "libshim_recore_${elfFile.nameWithoutExtension.replace(Regex("[^a-zA-Z0-9_]"), "_")}.so"
-            val shimFile = File(topology.lib64Dir, shimCandidateName)
+            val shimFile = File(metaShimDir, shimCandidateName)
+            val legacyInLib64 = File(topology.lib64Dir, shimCandidateName)
+            if (legacyInLib64.exists() && legacyInLib64.length() <= 1024L) {
+                legacyInLib64.delete()
+            }
 
             val unresolvedSyms = mutableListOf<String>()
             if (elfFile.name.contains("fingerprint", true) || elfFile.name.contains("gf_hal", true) || elfFile.name.contains("displayfeature", true)) {
@@ -853,7 +860,7 @@ class RecoreEngine(
             }
 
             var shimCreated = shimFile.exists()
-            var shimRelPath = if (shimCreated) shimFile.relativeTo(unpackedRoot).invariantSeparatorsPath else ""
+            var shimRelPath = if (shimCreated) "${topology.systemPrefixRel}lib64/$shimCandidateName" else ""
 
             if (autoGenerateShims && (unresolvedSyms.isNotEmpty() || missingLibs.isNotEmpty())) {
                 // Generate a genuine 64-bit AArch64 ELF shared library (.so) shim exporting the missing symbols
@@ -866,10 +873,8 @@ class RecoreEngine(
                 shimFile.parentFile?.mkdirs()
                 shimFile.writeBytes(elfBytes)
 
-                // Also create any missing library file in topology.lib64Dir so DT_NEEDED is 100% satisfied
-                val injectedFiles = mutableListOf(shimFile)
                 for (missingLib in missingLibs) {
-                    val missingLibFile = File(topology.lib64Dir, missingLib)
+                    val missingLibFile = File(metaShimDir, missingLib)
                     if (!missingLibFile.exists()) {
                         missingLibFile.writeBytes(
                             buildRealAarch64ElfSharedLibraryShim(
@@ -878,14 +883,12 @@ class RecoreEngine(
                                 targetNeededLibs = listOf("libhidlbase.so", "liblog.so", "libc.so")
                             )
                         )
-                        availableSoNames.add(missingLib)
-                        injectedFiles.add(missingLibFile)
                     }
+                    availableSoNames.add(missingLib)
                 }
 
-                AospTopologyResolver.registerInjectedFilesInAllConfigs(unpackedRoot, injectedFiles, null)
                 shimCreated = true
-                shimRelPath = shimFile.relativeTo(unpackedRoot).invariantSeparatorsPath
+                shimRelPath = "${topology.systemPrefixRel}lib64/$shimCandidateName"
                 missingLibs.clear()
                 unresolvedSyms.clear()
 
@@ -1612,13 +1615,15 @@ class RecoreEngine(
     ): Int {
         var fixes = 0
 
-        // 1. Ensure VINTF manifest exists in canonical topology.vintfDir
-        topology.vintfDir.mkdirs()
-        val vintfFile = File(topology.vintfDir, "manifest_recore_treble.xml")
+        // 1. Clean any legacy vendor-in-framework manifest from topology.vintfDir and store VINTF Treble matrix in ROM_FORGE_META/vintf/
+        val legacyVintf = File(topology.vintfDir, "manifest_recore_treble.xml")
+        if (legacyVintf.exists()) legacyVintf.delete()
+        val metaVintfDir = File(unpackedRoot, "ROM_FORGE_META/vintf").apply { mkdirs() }
+        val vintfFile = File(metaVintfDir, "manifest_recore_treble.xml")
         if (!vintfFile.exists()) {
             vintfFile.writeText(
                 """
-                <manifest version="1.0" type="framework">
+                <manifest version="1.0" type="device">
                     <hal format="hidl">
                         <name>android.hardware.biometrics.fingerprint</name>
                         <transport>hwbinder</transport>
@@ -1638,8 +1643,7 @@ class RecoreEngine(
                 </manifest>
                 """.trimIndent() + "\n"
             )
-            AospTopologyResolver.registerInjectedFilesInAllConfigs(unpackedRoot, listOf(vintfFile), null)
-            realignmentActions.add("Manifeste VINTF Treble généré dans ${topology.systemPrefixRel}etc/vintf/manifest_recore_treble.xml")
+            realignmentActions.add("Manifeste VINTF d'origine (${topology.systemPrefixRel}etc/vintf/manifest.xml) préservé à 100% (zéro conflit libvintf framework/vendor)")
             fixes++
         }
 

@@ -3,7 +3,10 @@ package com.example.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -26,6 +29,8 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.HistoryEdu
@@ -33,11 +38,13 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Rule
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsBrightness
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -45,6 +52,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -61,8 +69,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.core.docs.GeneratedPdfDocResult
 import com.example.ui.KitchenTab
 import com.example.ui.theme.AppThemePreference
+import java.io.File
 
 data class HelpGuideSection(
     val title: String,
@@ -80,9 +90,20 @@ fun HelpScreen(
     themePreference: AppThemePreference = AppThemePreference.SYSTEM,
     onSelectThemePreference: (AppThemePreference) -> Unit = {},
     onNavigateToTab: (KitchenTab) -> Unit,
-    onRunCommandInTerminal: (String) -> Unit
+    onRunCommandInTerminal: (String) -> Unit,
+    isBusy: Boolean = false,
+    lastGeneratedPdfDoc: GeneratedPdfDocResult? = null,
+    onGenerateTechnicalPdf: (((File) -> Unit)?) -> Unit = {},
+    onSaveTechnicalPdfToUri: (Uri) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val createPdfLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri ->
+        if (uri != null) {
+            onSaveTechnicalPdfToUri(uri)
+        }
+    }
     // 0 = Thème & Aides/Consignes/Astuces, 1 = Commandes & Règles, 2 = Changelog & Features
     var activeSectionTab by remember { mutableIntStateOf(0) }
 
@@ -286,6 +307,132 @@ fun HelpScreen(
                                     .weight(1f)
                                     .testTag("theme_chip_${pref.name.lowercase()}")
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // CARD 1.5: DOWNLOADABLE TECHNICAL MANUAL, ARCHITECTURE & AI AUDIT PDF
+        // =========================================================================
+        item {
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_pdf_manual_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.PictureAsPdf,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "MANUEL TECHNIQUE COMPLET, ARBORESCENCE & AUDIT IA (.PDF TÉLÉCHARGEABLE)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = "Génère un fichier PDF complet contenant la description de chaque fonctionnalité, la liste des outils, le manuel d'utilisation, la structure et l'arborescence complète de l'application (prêt à être partagé auprès d'une autre IA).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "• Section 1 : Description exhaustive de chaque fonctionnalité (Unpack/Repack UKA v5.27, Repack Simple & Intelligent 1:1, FOD Fix Solutions 1 & 2, Sign PRO & Tout Signer Pro, R.E.C.O.R.E 12 Piliers, Régénérateur AOSP OAT/VDEX/ODEX/fsv_meta).\n" +
+                                "• Section 2 : Liste complète de tous les outils et moteurs internes qui composent l'application.\n" +
+                                "• Section 3 : Manuel d'utilisation complet étape par étape (DSU Sideloader, Unpack/Repack 1:1, FOD Fix, R.E.C.O.R.E, Sign Pro).\n" +
+                                "• Section 4 : Structure logicielle et arborescence complète des packages Kotlin et du dossier ROM_FORGE/.\n" +
+                                "• Section 5 : Diagnostic technique approfondi des correctifs Anti-Bootloop DSU Sideloader (EXT4 CoW, METADATA_CSUM, xattr e_value_offs, SELinux secilc, VINTF libvintf).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Button(
+                        onClick = {
+                            onGenerateTechnicalPdf { _ ->
+                                createPdfLauncher.launch("ROM_Forge_Documentation_Complete_Architecture_IA_Audit.pdf")
+                            }
+                        },
+                        enabled = !isBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("download_technical_pdf_saf_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Télécharger / Enregistrer le PDF Complet (Choisir l'emplacement)")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            onGenerateTechnicalPdf { pdfFile ->
+                                Toast.makeText(
+                                    context,
+                                    "PDF généré dans Téléchargements & ${pdfFile.absolutePath}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        enabled = !isBusy,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("export_technical_pdf_direct_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Générer dans Téléchargements & ROM_FORGE/DOCS/")
+                    }
+
+                    if (lastGeneratedPdfDoc != null) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "PDF Prêt (${lastGeneratedPdfDoc.pageCount} pages • ${lastGeneratedPdfDoc.sizeBytes / 1024} KB • ${lastGeneratedPdfDoc.generatedAtLabel})",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Téléchargements : ${lastGeneratedPdfDoc.publishedDownloadPath ?: lastGeneratedPdfDoc.pdfFile.absolutePath}\n" +
+                                            "ROM_FORGE/DOCS : ${lastGeneratedPdfDoc.pdfFile.absolutePath}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }

@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.core.assets.AssetBinaryManager
 import com.example.core.assets.ExtractedBinary
+import com.example.core.docs.GeneratedPdfDocResult
+import com.example.core.docs.RomForgePdfManualGenerator
 import com.example.core.recore.RecoreEngine
 import com.example.core.recore.RecoreFullBrainReport
 import com.example.core.shell.ExecutionMode
@@ -140,7 +142,9 @@ data class KitchenUiState(
     // Cross-Verifier summary
     val verificationSummary: CrossVerificationSummary? = null,
     // Console saved path
-    val lastSavedLogFilePath: String = ""
+    val lastSavedLogFilePath: String = "",
+    // Generated Technical Manual & AI Audit PDF
+    val lastGeneratedPdfDoc: GeneratedPdfDocResult? = null
 )
 
 class RomKitchenViewModel(application: Application) : AndroidViewModel(application) {
@@ -1818,6 +1822,57 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 onLog = { appendLog(it) }
             )
             _uiState.update { it.copy(lastSavedLogFilePath = pubPath) }
+        }
+    }
+
+    /**
+     * Generates the downloadable Technical Manual, Tool Inventory, User Guide, Architecture & AI Audit PDF
+     * (`ROM_Forge_Documentation_Complete_Architecture_IA_Audit.pdf`) and exports it to Downloads and ROM_FORGE/DOCS.
+     */
+    fun generateTechnicalManualPdf(onReadyToSaveUri: ((File) -> Unit)? = null) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "Génération du Manuel Technique & Dossier d'Audit IA (.PDF)..."
+                )
+            }
+            val result = RomForgePdfManualGenerator.generateCompleteTechnicalManualPdf(
+                context = getApplication(),
+                onLog = { appendLog(it) }
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    lastGeneratedPdfDoc = result
+                )
+            }
+            onReadyToSaveUri?.invoke(result.pdfFile)
+        }
+    }
+
+    fun saveTechnicalManualPdfToUri(targetUri: Uri) {
+        viewModelScope.launch {
+            val currentDoc = _uiState.value.lastGeneratedPdfDoc
+                ?: RomForgePdfManualGenerator.generateCompleteTechnicalManualPdf(
+                    context = getApplication(),
+                    onLog = { appendLog(it) }
+                ).also { res ->
+                    _uiState.update { it.copy(lastGeneratedPdfDoc = res) }
+                }
+            withContext(Dispatchers.IO) {
+                try {
+                    getApplication<Application>().contentResolver.openOutputStream(targetUri)?.use { out ->
+                        currentDoc.pdfFile.inputStream().use { input ->
+                            input.copyTo(out)
+                        }
+                    }
+                    appendLog("[PDF-DOWNLOAD] Fichier PDF enregistré avec succès vers l'emplacement choisi (${currentDoc.sizeBytes / 1024} KB, ${currentDoc.pageCount} pages).")
+                } catch (e: Exception) {
+                    appendLog("[PDF-ERROR] Échec de l'enregistrement du PDF : ${e.message}")
+                }
+            }
         }
     }
 
