@@ -1302,8 +1302,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
             val readyLayers = fodStructReport.layerNodes.count { it.presentInGsi }
             recordActionCompleted(
-                moduleLabel = "Porting • FOD Fixer",
-                actionTitle = "Scan FODstruct & Plan d'Action",
+                moduleLabel = "PORTER • Scan FOD",
+                actionTitle = "Scan FOD (Éléments FOD de l'OS Unpacké)",
                 targetName = gsiDir.name,
                 summaryDetail = "$readyLayers/${fodStructReport.layerNodes.size} couches actives | Plan d'action 5 étapes généré"
             )
@@ -1313,6 +1313,179 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     activeTaskTitle = "",
                     activeTaskProgress = 1f,
                     portAnalysisResult = currentPort.copy(fodStructReport = fodStructReport)
+                )
+            }
+        }
+    }
+
+    /**
+     * Bouton "ExtractMe" dans PORTER :
+     * Extrait avec Root (ou lecture directe live) les HALs, blobs et composants de /system et /vendor
+     * de la ROM sur laquelle l'application est installée. Peut être utilisé en parallèle avec "USE Base".
+     */
+    fun executeExtractMeForPorting(combineWithUseBase: Boolean = true) {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "ExtractMe : Extraction Root & Live des HALs, Blobs, System & Vendor de la ROM actuelle...",
+                    activeTaskProgress = 0.4f
+                )
+            }
+            val extractionSummary = autoPorterEngine.executeExtractMeRootComponents(
+                combineWithUseBase = combineWithUseBase,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            recordActionCompleted(
+                moduleLabel = "PORTER • ExtractMe",
+                actionTitle = "ExtractMe (Extraction System & Vendor Hôte)",
+                targetName = gsiDir.name,
+                summaryDetail = "${extractionSummary.extractedHostSystemFilesCount} System + ${extractionSummary.extractedHostVendorFilesCount} Vendor extraits | Mode=${extractionSummary.activeSourceModeLabel}"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = currentPort.copy(sourceExtractionSummary = extractionSummary)
+                )
+            }
+        }
+    }
+
+    /**
+     * Bouton "USE Base" dans PORTER :
+     * Active la base de portage intégrée issue de LineageOS `android_device_xiaomi_tucana` (branche `lineage-24.0`)
+     * sans nécessiter Root, et fonctionne en parallèle avec `ExtractMe` pour un résultat optimal.
+     */
+    fun executeUseBaseLineageTucana(keepExtractMeParallel: Boolean = true) {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "USE Base : Activation de la base LineageOS 24.0 Xiaomi Tucana (SM6150)...",
+                    activeTaskProgress = 0.45f
+                )
+            }
+            val baseSummary = autoPorterEngine.activateUseBaseLineageTucana(
+                keepExtractMeParallel = keepExtractMeParallel,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            recordActionCompleted(
+                moduleLabel = "PORTER • USE Base",
+                actionTitle = "USE Base (LineageOS 24.0 Xiaomi Tucana SM6150)",
+                targetName = gsiDir.name,
+                summaryDetail = "${baseSummary.useBaseTucanaElementsCount} composants Tucana prêts | Mode=${baseSummary.activeSourceModeLabel}"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = currentPort.copy(sourceExtractionSummary = baseSummary)
+                )
+            }
+        }
+    }
+
+    /**
+     * Bouton "TOTAL SCAN" dans la partie FOD de PORTER :
+     * Scanne à la fois l'OS unpacké et l'OS du système hôte (+ Base LineageOS Tucana) et produit le résultat comparatif
+     * des éléments à porter, des éléments manquants et de la stratégie de portage FOD.
+     */
+    fun runPorterTotalComparativeFodScan() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "TOTAL SCAN FOD : Analyse comparative OS Unpacké (${gsiDir.name}) <-> OS Système Hôte & Base Tucana...",
+                    activeTaskProgress = 0.5f
+                )
+            }
+            val totalScan = autoPorterEngine.runFodTotalComparativeScan(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+            val fodStruct = autoPorterEngine.scanFodStructAndBuildActionPlan(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            recordActionCompleted(
+                moduleLabel = "PORTER • TOTAL SCAN",
+                actionTitle = "TOTAL SCAN Comparatif (OS Unpacké <-> Système Hôte)",
+                targetName = gsiDir.name,
+                summaryDetail = "${totalScan.comparativeItems.size} catégories comparées | ${totalScan.missingElementsToPort.size} éléments ciblés"
+            )
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = currentPort.copy(
+                        fodStructReport = fodStruct,
+                        totalScanReport = totalScan
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Bouton "FOD Fix" dans PORTER :
+     * Applique les fixes et corrections nécessaires au FOD directement sur le GSI unpacké SANS le repacker
+     * et SANS modifier aucun APK interne (0 risque de bootloop).
+     */
+    fun applyFodFixUnpackOnlyZeroApk() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "FOD Fix (Sur GSI Unpacké SANS Repack • Sans modifier les APKs internes) sur ${gsiDir.name}...",
+                    activeTaskProgress = 0.4f
+                )
+            }
+            val result = autoPorterEngine.applyFodFixUnpackOnlyZeroApkTouch(
+                targetUnpackedGsiDir = gsiDir,
+                onLog = { appendLog(it) }
+            )
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = gsiDir,
+                subFolderName = "UNPACK/${gsiDir.name}",
+                onLog = { appendLog(it) }
+            )
+            val activeKeys = repository.getAllKeys()
+            val recoreReport = recoreEngine.analyzeAndReconstruct(
+                unpackedRoot = gsiDir,
+                activeKeys = activeKeys,
+                autoHealAndGenerateShims = false,
+                onLog = { appendLog(it) }
+            )
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "PORTER • FOD Fix",
+                actionTitle = "FOD Fix (Appliqué sur GSI Unpacké SANS Repack • Zéro Modif APK)",
+                targetName = gsiDir.name,
+                summaryDetail = "init.tucana.fod.rc + uinput-goodix.kl + sysconfig + build.prop FOD | 0 APK modifié | Prêt pour R.E.C.O.R.E"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = result,
+                    recoreBrainReport = recoreReport,
+                    verificationSummary = summary
                 )
             }
         }

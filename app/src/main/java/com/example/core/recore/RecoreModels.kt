@@ -209,5 +209,7 @@ data class RecoreFullBrainReport(
     val artifactRegenItems: List<RecoreArtifactRegenItem> = emptyList(),
     val dependencyCascadeChains: List<RecoreDependencyCascadeChain> = emptyList(),
     val staleArtifactsNeedingRegenCount: Int = 0,
-    val initialStructureBlueprint: RecoreInitialStructureBlueprint? = null
+    val initialStructureBlueprint: RecoreInitialStructureBlueprint? = null,
+    val scannerMasterReport: RecoreScannerMasterReport? = null,
+    val compareEngineReport: RecoreCompareEngineReport? = null
 )

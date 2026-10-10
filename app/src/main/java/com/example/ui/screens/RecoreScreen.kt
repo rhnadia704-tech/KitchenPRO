@@ -87,6 +87,8 @@ fun RecoreScreen(
 
     val sectionTabs = listOf(
         "Vue Globale & Z3 SMT",
+        "SCANNER (${report?.scannerMasterReport?.totalReportsCount ?: 16} Rapports)",
+        "COMPARE (Diff & Chaînes)",
         "Partitions & DAG",
         "Symboles ELF & Shims",
         "Init.rc & Sandbox ARM64",
@@ -603,9 +605,253 @@ fun RecoreScreen(
                 }
 
                 // =========================================================================
-                // TAB 1: MULTI-PARTITION MAPPING & MULTI-LAYER DEPENDENCY GRAPH (DAG)
+                // TAB 1: MOTEUR SCANNER (16+ RAPPORTS EXHAUSTIFS D'ANALYSE DE L'IMG UNPACKÉ)
                 // =========================================================================
                 1 -> {
+                    val scanner = report.scannerMasterReport
+                    if (scanner != null) {
+                        item {
+                            ElevatedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("recore_scanner_master_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "MOTEUR SCANNER • ${scanner.totalReportsCount} RAPPORTS EXHAUSTIFS",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                            Text(
+                                                text = "Cohérence, Interdépendance, Structure & Format de l'IMG Unpacké (${scanner.targetImageName})",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.secondaryContainer,
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text(
+                                                text = "${scanner.overallCoherencePercent}% COHÉRENT",
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "• Format de Base : ${scanner.baseFormatSummary}\n" +
+                                            "• Topologie SAR  : ${scanner.sarTopologySummary}\n" +
+                                            "• Détections     : SHARED_BLOCKS=${scanner.sharedBlocksDetected} | HTree DIR_INDEX=${scanner.htreeIndexedDirsDetected} | AVB Footer=${scanner.avbFooterDetected}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+
+                        scanner.reports.forEach { rep ->
+                            item {
+                                OutlinedCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "${rep.reportTitle} [${rep.reportCode}]",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primaryContainer,
+                                                shape = RoundedCornerShape(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "${rep.status} (${rep.coherenceScore}%)",
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = rep.keyMetricsSummary,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        rep.findings.forEach { f ->
+                                            Text(
+                                                text = "• $f",
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                        Text(
+                                            text = "Stratégie R.E.C.O.R.E : ${rep.recoreRecommendation}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // =========================================================================
+                // TAB 2: MOTEUR COMPARE (ÉLÉMENTS NOUVEAUX/MODIFIÉS & CHAÎNES DE FIXATION)
+                // =========================================================================
+                2 -> {
+                    val compare = report.compareEngineReport
+                    if (compare != null) {
+                        item {
+                            ElevatedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("recore_compare_engine_card")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "MOTEUR COMPARE • ÉLÉMENTS NOUVEAUX & CHAÎNES DE FIXATION",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                            Text(
+                                                text = "Identification chirurgicale des éléments ajoutés/modifiés et communication inter-moteurs",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Surface(
+                                            color = if (compare.is100PercentIdenticalToBase) {
+                                                MaterialTheme.colorScheme.secondaryContainer
+                                            } else {
+                                                MaterialTheme.colorScheme.tertiaryContainer
+                                            },
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text(
+                                                text = if (compare.is100PercentIdenticalToBase) "100% IDENTIQUE" else "+${compare.addedElementsCount} / ~${compare.modifiedElementsCount}",
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = "• Fichiers intacts : ${compare.unmodifiedFilesCount} | Nouveaux : ${compare.addedElementsCount} | Modifiés : ${compare.modifiedElementsCount} | Supprimés : ${compare.deletedElementsCount}\n" +
+                                            "• Protocole Inter-Moteurs : ${compare.recoreInterEngineProtocolSummary}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+
+                                    HorizontalDivider()
+
+                                    Text(
+                                        text = "Stratégies et Chaînes de Fixation déclenchées par R.E.C.O.R.E :",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    compare.chainedFixStrategies.forEach { st ->
+                                        Text(
+                                            text = "✓ $st",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        compare.elements.forEach { el ->
+                            item {
+                                OutlinedCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "[${el.changeKind} • ${el.elementCategory}] ${el.relativePath}",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = FontFamily.Monospace,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                text = el.bootRiskLevel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.secondary
+                                            )
+                                        }
+                                        Text(
+                                            text = "Taille : ${el.sizeBytes}B (Base=${el.baseSizeBytes}B) • Chaîne requise=${el.requiresChainedFix}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        el.requiredFixChain.forEach { step ->
+                                            Text(
+                                                text = "  -> $step",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        Text(
+                                            text = "Action R.E.C.O.R.E : ${el.recoreActionApplied}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // =========================================================================
+                // TAB 3: MULTI-PARTITION MAPPING & MULTI-LAYER DEPENDENCY GRAPH (DAG)
+                // =========================================================================
+                3 -> {
                     item {
                         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
@@ -747,9 +993,9 @@ fun RecoreScreen(
                 }
 
                 // =========================================================================
-                // TAB 2: ELF64 SYMBOLS (DT_NEEDED) & AUTOMATIC BINARY SHIM GENERATOR
+                // TAB 4: ELF64 SYMBOLS (DT_NEEDED) & AUTOMATIC BINARY SHIM GENERATOR
                 // =========================================================================
-                2 -> {
+                4 -> {
                     if (report.generatedShims.isNotEmpty()) {
                         item {
                             ElevatedCard(
@@ -862,9 +1108,9 @@ fun RecoreScreen(
                 }
 
                 // =========================================================================
-                // TAB 3: INIT.RC BOOT SEQUENCE SIMULATION & PRE-BOOT ARM64 SANDBOX
+                // TAB 5: INIT.RC BOOT SEQUENCE SIMULATION & PRE-BOOT ARM64 SANDBOX
                 // =========================================================================
-                3 -> {
+                5 -> {
                     item {
                         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
@@ -982,9 +1228,9 @@ fun RecoreScreen(
                 }
 
                 // =========================================================================
-                // TAB 4: INTERNAL TRUST CHAIN (AVB 2.0 / APK / APEX) & HEADLESS C-ABI FFI
+                // TAB 6: INTERNAL TRUST CHAIN (AVB 2.0 / APK / APEX) & HEADLESS C-ABI FFI
                 // =========================================================================
-                4 -> {
+                6 -> {
                     item {
                         ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                             Column(

@@ -538,11 +538,17 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     portHistory = portHistory,
                                     onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
                                     onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
+                                    onExecuteExtractMe = viewModel::executeExtractMeForPorting,
+                                    onExecuteUseBaseLineageTucana = viewModel::executeUseBaseLineageTucana,
+                                    onExecutePortageToUnpackedGsi = viewModel::executeGsiToSystemAutoPort,
                                     onInspectGsiMechanism = viewModel::inspectGsiVendorMechanism,
                                     onScanFodStruct = viewModel::scanGsiFodStruct,
+                                    onRunFodTotalComparativeScan = viewModel::runPorterTotalComparativeFodScan,
+                                    onApplyFodFixUnpackOnlyZeroApk = viewModel::applyFodFixUnpackOnlyZeroApk,
                                     onFixFodCoherentStock = viewModel::applyCoherentStockGradeFodFix,
                                     onFixFodOverlayOnlyZeroSign = viewModel::applyOverlayOnlyZeroSignFodFix,
-                                    onExecuteFullAutoPort = viewModel::executeGsiToSystemAutoPort
+                                    onNavigateToCompiler = { viewModel.selectTab(KitchenTab.COMPILER) },
+                                    onNavigateToRecore = { viewModel.selectTab(KitchenTab.RECORE) }
                                 )
 
                                 KitchenTab.RECORE -> RecoreScreen(

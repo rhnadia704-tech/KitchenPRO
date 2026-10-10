@@ -264,6 +264,15 @@ class RecoreEngine(
             onLog = { }
         )
 
+        val scannerReport = RecoreScannerAndCompareEngines.runExhaustiveScannerEngine(
+            unpackedRoot = unpackedRoot,
+            onLog = onLog
+        )
+        val compareReport = RecoreScannerAndCompareEngines.runCompareDifferentialEngine(
+            unpackedRoot = unpackedRoot,
+            onLog = onLog
+        )
+
         RecoreFullBrainReport(
             targetImageName = unpackedRoot.name,
             targetUnpackedPath = unpackedRoot.absolutePath,
@@ -287,7 +296,9 @@ class RecoreEngine(
             artifactRegenItems = artifactRegenItems,
             dependencyCascadeChains = cascadeChains,
             staleArtifactsNeedingRegenCount = staleArtifactsCount,
-            initialStructureBlueprint = finalBlueprint
+            initialStructureBlueprint = finalBlueprint,
+            scannerMasterReport = scannerReport,
+            compareEngineReport = compareReport
         )
     }
 
