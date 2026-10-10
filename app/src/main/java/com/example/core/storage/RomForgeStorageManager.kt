@@ -74,6 +74,8 @@ class RomForgeStorageManager(private val context: Context) {
         File(root, "PACKED").mkdirs()
         File(root, "KEY/Data").mkdirs()
         File(root, "PORT").mkdirs()
+        File(root, "EXTRACT").mkdirs()
+        File(root, "CREATION").mkdirs()
     }
 
     fun getUserVisibleDisplayRoot(): String {
@@ -123,6 +125,12 @@ class RomForgeStorageManager(private val context: Context) {
 
     // 4. PORT folder (for GSI porting workspace, modified files, and final ported images)
     fun getPortWorkspaceRootDir(): File = File(getRomForgePublicRoot(), "PORT").apply { mkdirs() }
+
+    // 5. EXTRACT folder (for EXTRACTOR module -> ExtractMe phone DNA, partitions, HALs, blobs)
+    fun getExtractRootDir(): File = File(getRomForgePublicRoot(), "EXTRACT").apply { mkdirs() }
+
+    // 6. CREATION folder (for CREATION module -> GASTROengine Make IMG & Make ROM Flashable ZIP)
+    fun getCreationOutputDir(): File = File(getRomForgePublicRoot(), "CREATION").apply { mkdirs() }
 
     // Standalone signed APKs folder inside PACKED/signed_apks
     fun getSingleSignedApksDir(): File = File(getPackedOutputImagesDir(), "signed_apks").apply { mkdirs() }

@@ -1,13 +1,10 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,49 +14,44 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountTree
-import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CompareArrows
-import androidx.compose.material.icons.filled.DeveloperBoard
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Science
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,983 +61,1106 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.local.PortHistoryEntity
-import com.example.modules.porter.FodLayerNode
-import com.example.modules.porter.FodStructScanReport
-import com.example.modules.porter.FodTotalComparativeScanReport
-import com.example.modules.porter.GsiMechanismAndVendorReport
-import com.example.modules.porter.ProprietaryBlobItem
 import com.example.ui.KitchenUiState
 
+private enum class PorterSubPage {
+    MAIN_HUB,
+    PORTER_PLAN_PAGE,
+    FOD_ENGINE_PAGE
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AutoPorterScreen(
     uiState: KitchenUiState,
     portHistory: List<PortHistoryEntity>,
     onSelectDecompiledImg: (String) -> Unit,
-    onPickCustomSafTree: (Uri?) -> Unit,
-    onExecuteExtractMe: (combineWithUseBase: Boolean) -> Unit,
-    onExecuteUseBaseLineageTucana: (keepExtractMeParallel: Boolean) -> Unit,
+    onPickCustomSafTree: (Uri) -> Unit,
     onExecutePortageToUnpackedGsi: () -> Unit,
-    onInspectGsiMechanism: () -> Unit,
-    onScanFodStruct: () -> Unit,
-    onRunFodTotalComparativeScan: () -> Unit,
-    onApplyFodFixUnpackOnlyZeroApk: () -> Unit,
-    onFixFodCoherentStock: () -> Unit,
-    onFixFodOverlayOnlyZeroSign: () -> Unit,
-    onNavigateToCompiler: () -> Unit = {},
-    onNavigateToRecore: () -> Unit = {}
+    onRunPorterPlanAnalysis: () -> Unit,
+    onRunFodCompleteScan: () -> Unit,
+    onRunFodAiScan: () -> Unit,
+    onApplyFodFix1Complete: () -> Unit,
+    onApplyFodFix2Workaround: () -> Unit,
+    onApplyFodFix3AiAndGastroEngine: () -> Unit,
+    onNavigateToExtractor: () -> Unit,
+    onNavigateToCreation: () -> Unit
 ) {
-    val portResult = uiState.portAnalysisResult
-    val isBusy = uiState.isBusy
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var dropdownExpanded by remember { mutableStateOf(false) }
-    var useExtractMeActive by remember { mutableStateOf(true) }
-    var useBaseTucanaActive by remember { mutableStateOf(true) }
+    var currentSubPage by rememberSaveable { mutableStateOf(PorterSubPage.MAIN_HUB) }
 
-    val customTreeLauncher = rememberLauncherForActivityResult(
+    if (currentSubPage != PorterSubPage.MAIN_HUB) {
+        BackHandler {
+            currentSubPage = PorterSubPage.MAIN_HUB
+        }
+    }
+
+    when (currentSubPage) {
+        PorterSubPage.MAIN_HUB -> PorterMainHubPage(
+            uiState = uiState,
+            portHistory = portHistory,
+            onSelectDecompiledImg = onSelectDecompiledImg,
+            onPickCustomSafTree = onPickCustomSafTree,
+            onExecutePort = onExecutePortageToUnpackedGsi,
+            onOpenPorterPlanPage = {
+                onRunPorterPlanAnalysis()
+                currentSubPage = PorterSubPage.PORTER_PLAN_PAGE
+            },
+            onOpenFodPage = {
+                currentSubPage = PorterSubPage.FOD_ENGINE_PAGE
+            },
+            onNavigateToExtractor = onNavigateToExtractor,
+            onNavigateToCreation = onNavigateToCreation
+        )
+
+        PorterSubPage.PORTER_PLAN_PAGE -> PorterPlanDedicatedPage(
+            uiState = uiState,
+            onBack = { currentSubPage = PorterSubPage.MAIN_HUB },
+            onRefreshPorterPlan = onRunPorterPlanAnalysis,
+            onNavigateToExtractor = onNavigateToExtractor,
+            onExecutePort = onExecutePortageToUnpackedGsi
+        )
+
+        PorterSubPage.FOD_ENGINE_PAGE -> PorterFodDedicatedPage(
+            uiState = uiState,
+            onBack = { currentSubPage = PorterSubPage.MAIN_HUB },
+            onRunScan = onRunFodCompleteScan,
+            onRunAiScan = onRunFodAiScan,
+            onApplyFodFix1 = onApplyFodFix1Complete,
+            onApplyFodFix2 = onApplyFodFix2Workaround,
+            onApplyFodFix3 = onApplyFodFix3AiAndGastroEngine,
+            onNavigateToExtractor = onNavigateToExtractor,
+            onNavigateToCreation = onNavigateToCreation
+        )
+    }
+}
+
+// ============================================================================
+// 1. PORTER MAIN HUB PAGE (Dropdown + PORT + PORTERPLAN + FOD)
+// ============================================================================
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PorterMainHubPage(
+    uiState: KitchenUiState,
+    portHistory: List<PortHistoryEntity>,
+    onSelectDecompiledImg: (String) -> Unit,
+    onPickCustomSafTree: (Uri) -> Unit,
+    onExecutePort: () -> Unit,
+    onOpenPorterPlanPage: () -> Unit,
+    onOpenFodPage: () -> Unit,
+    onNavigateToExtractor: () -> Unit,
+    onNavigateToCreation: () -> Unit
+) {
+    var expandedDropdown by remember { mutableStateOf(false) }
+    val safTreeLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
+    ) { uri: Uri? ->
         if (uri != null) onPickCustomSafTree(uri)
     }
 
-    val tabs = listOf(
-        "FOD & TOTAL SCAN (${portResult?.totalScanReport?.comparativeItems?.size ?: portResult?.fodStructReport?.layerNodes?.size ?: 0})",
-        "Mécanisme GSI/Vendor (${portResult?.gsiMechanismReport?.vendorHalDiffs?.size ?: 0})",
-        "Blobs (${portResult?.proprietaryBlobs?.size ?: 0})",
-        "Device Tree .mk & Historique (${portHistory.size})"
-    )
+    val portResult = uiState.portAnalysisResult
 
-    LazyColumn(
+    Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. HEADER & DROPDOWN LIST OF UNPACKED FOLDERS
-        item {
-            ElevatedCard(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.elevatedCardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
+        // Header Card
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.AccountTree,
-                            contentDescription = "PORTER Hub",
-                            modifier = Modifier.size(30.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.AccountTree,
+                        contentDescription = "PORTER",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "PORTER • Plateforme de Portage GSI",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
                         )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "PORTER Refonte Totale • ExtractMe + USE Base + FOD Suite",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            Text(
-                                text = "Portage Système/Vendor vers GSI Unpacké • Zéro risque de bootloop (idmap2 / secilc / libvintf Safe)",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
-                            )
+                        Text(
+                            text = "GASTROengine (Rust) • StructureAligner • VintfReconciler • R.E.C.O.R.E (Fond)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                Text(
+                    text = "Choisissez l'OS unpacké cible, consultez l'architecture comparative dans PORTERPLAN, lancez le portage complet PORT (basé sur EXTRACTOR) ou ouvrez l'ingénierie FOD.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        // 1. Dropdown field to select which unpacked OS to port
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "1. Choisir l'OS Unpacké à Porter (UNPACK/)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ExposedDropdownMenuBox(
+                        expanded = expandedDropdown,
+                        onExpandedChange = { expandedDropdown = !expandedDropdown },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        OutlinedTextField(
+                            value = uiState.selectedDecompiledImgName,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Dossier OS Unpacké") },
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedDropdown) },
+                            modifier = Modifier
+                                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                                .fillMaxWidth()
+                                .testTag("porter_dropdown_unpacked_os")
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expandedDropdown,
+                            onDismissRequest = { expandedDropdown = false }
+                        ) {
+                            uiState.availableDecompiledImgs.forEach { folder ->
+                                DropdownMenuItem(
+                                    text = { Text("UNPACK/$folder") },
+                                    onClick = {
+                                        onSelectDecompiledImg(folder)
+                                        expandedDropdown = false
+                                    }
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = "1. Champ avec Liste Déroulante des Dossiers Unpackés (ROM_FORGE/UNPACK) :",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    OutlinedButton(
+                        onClick = { safTreeLauncher.launch(null) },
+                        modifier = Modifier.testTag("porter_btn_pick_saf")
                     ) {
-                        Box(modifier = Modifier.weight(1f)) {
-                            OutlinedCard(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !isBusy) { dropdownExpanded = true }
-                                    .testTag("porter_unpacked_dropdown"),
-                                colors = CardDefaults.outlinedCardColors(
-                                    containerColor = MaterialTheme.colorScheme.surface
-                                )
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.FolderOpen,
-                                            contentDescription = "Dossier Unpacké",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Column {
-                                            Text(
-                                                text = uiState.selectedDecompiledImgName.ifBlank { "Sélectionner un dossier unpacké..." },
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                            Text(
-                                                text = uiState.selectedDecompiledImgFullPath,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "Ouvrir la liste déroulante"
-                                    )
-                                }
-                            }
+                        Icon(imageVector = Icons.Default.FolderOpen, contentDescription = "Importer dossier")
+                    }
+                }
 
-                            DropdownMenu(
-                                expanded = dropdownExpanded,
-                                onDismissRequest = { dropdownExpanded = false },
-                                modifier = Modifier.fillMaxWidth(0.85f)
-                            ) {
-                                if (uiState.availableDecompiledImgs.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("Aucun dossier unpacké trouvé (Décompilez d'abord un .img)") },
-                                        onClick = { dropdownExpanded = false }
-                                    )
-                                } else {
-                                    uiState.availableDecompiledImgs.forEach { folderName ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Column {
-                                                    Text(
-                                                        text = "UNPACK/$folderName",
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                    Text(
-                                                        text = "${uiState.romForgePublicPath}/UNPACK/$folderName",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontFamily = FontFamily.Monospace
-                                                    )
-                                                }
-                                            },
-                                            onClick = {
-                                                onSelectDecompiledImg(folderName)
-                                                dropdownExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                Text(
+                    text = "Cible active : ${uiState.selectedDecompiledImgFullPath}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
 
-                        OutlinedButton(
-                            onClick = { customTreeLauncher.launch(null) },
-                            enabled = !isBusy,
-                            modifier = Modifier.testTag("porter_saf_folder_btn")
+        // 2. EXTRACTOR Prerequisite Banner + PORT Button
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "2. Actions Principales de Portage (PORT / PORTERPLAN / FOD)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                // Status of EXTRACTOR
+                Surface(
+                    color = if (uiState.isExtractReady) {
+                        Color(0xFF0D2B1D)
+                    } else {
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f)
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.FolderOpen, contentDescription = "SAF", modifier = Modifier.size(18.dp))
+                            Icon(
+                                imageVector = if (uiState.isExtractReady) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (uiState.isExtractReady) Color(0xFF00E676) else MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = if (uiState.isExtractReady) {
+                                        "EXTRACTOR Prêt : ${uiState.extractedFilesCount} fichiers dans ROM_FORGE/EXTRACT/"
+                                    } else {
+                                        "Prérequis PORT : Aucun extract trouvé dans ROM_FORGE/EXTRACT/"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (uiState.isExtractReady) Color(0xFFB9F6CA) else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    text = if (uiState.isExtractReady) {
+                                        "Le bouton PORT est déverrouillé et prêt à créer le portage complet."
+                                    } else {
+                                        "Exécutez d'abord ExtractMe dans EXTRACTOR pour activer le bouton PORT."
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (uiState.isExtractReady) Color(0xFFB9F6CA) else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
                         }
+                        if (!uiState.isExtractReady) {
+                            OutlinedButton(
+                                onClick = onNavigateToExtractor,
+                                modifier = Modifier.testTag("porter_btn_goto_extractor")
+                            ) {
+                                Icon(imageVector = Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("EXTRACTOR")
+                            }
+                        }
+                    }
+                }
+
+                // Button 1: PORT (Requires an extract done by EXTRACTOR)
+                Button(
+                    onClick = onExecutePort,
+                    enabled = !uiState.isBusy && uiState.isExtractReady,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .testTag("btn_porter_port")
+                ) {
+                    Icon(imageVector = Icons.Default.Memory, contentDescription = "PORT")
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "PORT (Créer le Portage Complet vers ${uiState.selectedDecompiledImgName})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+
+                // Button 2: PORTERPLAN (Opens dedicated page)
+                Button(
+                    onClick = onOpenPorterPlanPage,
+                    enabled = !uiState.isBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("btn_porter_porterplan")
+                ) {
+                    Icon(imageVector = Icons.Default.CompareArrows, contentDescription = "PORTERPLAN")
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "PORTERPLAN (Architecture & Comparatif GSI <-> Téléphone)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+
+                // Button 3: FOD (Opens dedicated FOD page with SCAN, AISCAN, FOD Fix 1, 2, 3)
+                Button(
+                    onClick = onOpenFodPage,
+                    enabled = !uiState.isBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .testTag("btn_porter_open_fod_page")
+                ) {
+                    Icon(imageVector = Icons.Default.Fingerprint, contentDescription = "FOD")
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "FOD (SCAN • AISCAN • FOD Fix 1, 2 & 3)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            }
+        }
+
+        // 3. Summary of Last Port Result + Quick Link to CREATION
+        if (portResult != null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "État Actuel du Portage (${portResult.gsiTargetName})",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    Text(
+                        text = "• Appareil de référence : ${portResult.stockDeviceBrand} ${portResult.stockDeviceCodename} (${portResult.stockBoardPlatform})\n" +
+                                "• Blobs & HALs analysés : ${portResult.proprietaryBlobs.size}\n" +
+                                "• Capteur FOD : ${portResult.fodDiagnostics.sensorVendor} (X=${portResult.fodDiagnostics.fodCenterX}, Y=${portResult.fodDiagnostics.fodCenterY}, R=${portResult.fodDiagnostics.fodRadiusPx})\n" +
+                                "• Dernier mode FOD appliqué : ${portResult.lastAppliedFodFixMode.ifBlank { "Aucun (Prêt)" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    OutlinedButton(
+                        onClick = onNavigateToCreation,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("porter_btn_goto_creation")
+                    ) {
+                        Icon(imageVector = Icons.Default.Build, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Passer à CREATION (Make IMG / Make ROM .zip)")
                     }
                 }
             }
         }
 
-        // 2. EXTRACTME (ROOT) + EN PARALLÈLE USE BASE (LINEAGEOS 24.0 XIAOMI TUCANA) + BOUTON PORTAGE
-        item {
+        if (portHistory.isNotEmpty()) {
             Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
-                )
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
-                        text = "2. Extraction Composants System/Vendor & Base LineageOS 24.0 Tucana",
+                        text = "Historique des Portages (${portHistory.size})",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    portHistory.take(4).forEach { item ->
+                        Text(
+                            text = "• ${item.gsiTargetName} <- ${item.stockDeviceName} (${item.blobsTransplanted} blobs, ${item.fodStatus})",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 2. PORTERPLAN DEDICATED PAGE (Architecture & Comparative GSI <-> Phone)
+// ============================================================================
+@Composable
+private fun PorterPlanDedicatedPage(
+    uiState: KitchenUiState,
+    onBack: () -> Unit,
+    onRefreshPorterPlan: () -> Unit,
+    onNavigateToExtractor: () -> Unit,
+    onExecutePort: () -> Unit
+) {
+    val plan = uiState.gastroPorterPlanReport
+    val mechReport = uiState.portAnalysisResult?.gsiMechanismReport
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Top Bar with Back Button
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.testTag("porterplan_btn_back")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Retour vers PORTER"
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "PORTERPLAN • Architecture & Comparatif",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "GSI (${uiState.selectedDecompiledImgName}) <-> Téléphone (EXTRACT/) • GASTROengine",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = onRefreshPorterPlan,
+                        enabled = !uiState.isBusy,
+                        modifier = Modifier.testTag("porterplan_btn_refresh")
+                    ) {
+                        Text("Actualiser")
+                    }
+                }
+            }
+        }
+
+        if (plan != null) {
+            // Summary of StructureAligner & VintfReconciler
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Synthèse GASTROengine (StructureAligner & VintfReconciler)",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                        fontWeight = FontWeight.ExtraBold
                     )
                     Text(
-                        text = "• ExtractMe (Root) : Extrait les HALs, blobs et composants de /system et /vendor de la ROM actuelle sur laquelle l'application est installée.\n" +
-                            "• USE Base (Sans Root ou En Parallèle) : Utilise les éléments intégrés de LineageOS android_device_xiaomi_tucana & branche lineage-24.0 (SM6150 / Goodix GF9518 / HBM 0x20000). Utilisable sans root ou en parallèle avec ExtractMe pour un résultat optimal.\n" +
-                            "• PORTAGE : Porte tous les éléments de la ROM actuelle vers le dossier d'image unpacké en prenant comme fondement ExtractMe, USE Base ou les deux combinés.",
+                        text = "• ADN Téléphone : ${plan.hostDnaSummary}\n" +
+                                "• État EXTRACT/ : ${if (plan.extractFolderReady) "PRÊT (${plan.extractFilesCount} fichiers)" else "EN ATTENTE D'EXTRACTOR"}\n" +
+                                "• StructureAligner : ${plan.symlinkAlignmentSummary}\n" +
+                                "• VintfReconciler : ${plan.vintfReconcileSummary}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.9f)
+                        fontFamily = FontFamily.Monospace
                     )
+                }
+            }
 
-                    // Parallel buttons: ExtractMe & USE Base
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                useExtractMeActive = true
-                                onExecuteExtractMe(useBaseTucanaActive)
-                            },
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("porter_extract_me_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            )
-                        ) {
-                            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("ExtractMe (Root)", fontWeight = FontWeight.Bold)
-                        }
+            // Detailed Architecture Comparison: How it works in Host ROM vs Why it fails in GSI
+            Text(
+                text = "Architecture Comparative : Pourquoi les éléments fonctionnent dans votre ROM et pourquoi ils échouent dans le GSI",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.ExtraBold
+            )
 
-                        Button(
-                            onClick = {
-                                useBaseTucanaActive = true
-                                onExecuteUseBaseLineageTucana(useExtractMeActive)
-                            },
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("porter_use_base_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondary
-                            )
-                        ) {
-                            Icon(Icons.Default.DeveloperBoard, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("USE Base (Tucana)", fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    // Active source toggles for combined usage
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+            plan.architectureComparisons.forEach { diff ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Fondement actif :",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold
+                            text = diff.subsystem,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
                         )
-                        FilterChip(
-                            selected = useExtractMeActive,
-                            onClick = { useExtractMeActive = !useExtractMeActive },
-                            label = { Text("ExtractMe (Host System/Vendor)") },
-                            modifier = Modifier.testTag("toggle_use_extractme")
-                        )
-                        FilterChip(
-                            selected = useBaseTucanaActive,
-                            onClick = { useBaseTucanaActive = !useBaseTucanaActive },
-                            label = { Text("USE Base (LineageOS 24.0 Tucana)") },
-                            modifier = Modifier.testTag("toggle_use_base")
-                        )
-                    }
 
-                    // Display active source summary if available
-                    portResult?.sourceExtractionSummary?.let { ext ->
                         Surface(
+                            color = Color(0xFF0E2A1E),
                             shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
                                 Text(
-                                    text = "Mode Source Actif : ${ext.activeSourceModeLabel}",
+                                    text = "✓ Comment ça fonctionne dans la ROM du téléphone :",
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = Color(0xFF69F0AE)
                                 )
                                 Text(
-                                    text = "Root: ${if (ext.rootProbedSuccess) "Confirmé (uid=0)" else "Lecture Live Directe"} • System Hôte: ${ext.extractedHostSystemFilesCount} • Vendor Hôte: ${ext.extractedHostVendorFilesCount} • Base Tucana (lineage-24.0): ${ext.useBaseTucanaElementsCount} composants",
+                                    text = diff.howItWorksInHostRom,
                                     style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace
+                                    color = Color(0xFFE0F2F1)
                                 )
-                                ext.extractedElementsPreview.take(4).forEach { line ->
-                                    Text(
-                                        text = "• $line",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
                             }
                         }
-                    }
 
-                    // PORTAGE button
-                    Button(
-                        onClick = onExecutePortageToUnpackedGsi,
-                        enabled = !isBusy,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("porter_portage_button"),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary
-                        )
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            color = Color(0xFF331518),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "✗ Pourquoi ce n'est pas le cas dans le GSI :",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFFF8A80)
+                                )
+                                Text(
+                                    text = diff.whyItFailsInUnpackedGsi,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFFFEBEE)
+                                )
+                            }
+                        }
+
                         Text(
-                            text = "PORTAGE (Porter tous les éléments vers ${uiState.selectedDecompiledImgName})",
+                            text = "Éléments à porter vers le GSI :",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        diff.elementsToPortFromExtract.forEach { el ->
+                            Text(
+                                text = "  -> $el",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        Text(
+                            text = "Action GASTROengine : ${diff.gastroEngineAlignmentAction}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
+
+            // Elements to port list
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Liste Complète des Éléments à Porter vers ${plan.gsiName}",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    plan.missingBlobsAndConfigs.forEach { item ->
+                        Text(
+                            text = "• $item",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    HorizontalDivider()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onNavigateToExtractor,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("EXTRACTOR")
+                        }
+                        Button(
+                            onClick = onExecutePort,
+                            enabled = !uiState.isBusy && uiState.isExtractReady,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Lancer PORT")
+                        }
+                    }
+                }
+            }
         }
 
-        // 3. PARTIE FOD : Scan FOD + TOTAL SCAN + FOD Fix (Sans Repack, Sans Toucher APK) + En Parallèle FOD Fix PRO (Stock ROM Totale)
-        item {
+        if (mechReport != null) {
             Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.72f)
-                )
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Comparatif Détaillé des Interfaces HAL (VintfReconciler)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                    mechReport.vendorHalDiffs.forEach { hal ->
+                        Text(
+                            text = "• ${hal.halName} (${hal.version} / ${hal.transport}) -> ${hal.statusLabel}\n  ${hal.differenceExplanation}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. FOD DEDICATED PAGE (SCAN, AISCAN, FOD Fix 1, FOD Fix 2, FOD Fix 3)
+// ============================================================================
+@Composable
+private fun PorterFodDedicatedPage(
+    uiState: KitchenUiState,
+    onBack: () -> Unit,
+    onRunScan: () -> Unit,
+    onRunAiScan: () -> Unit,
+    onApplyFodFix1: () -> Unit,
+    onApplyFodFix2: () -> Unit,
+    onApplyFodFix3: () -> Unit,
+    onNavigateToExtractor: () -> Unit,
+    onNavigateToCreation: () -> Unit
+) {
+    val portResult = uiState.portAnalysisResult
+    val totalScan = portResult?.totalScanReport
+    val fodStruct = portResult?.fodStructReport
+    val aiScan = uiState.gastroAiScanReport
+    val recore = uiState.recoreBrainReport
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Header with Back button
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier.testTag("fod_page_btn_back")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Retour vers PORTER"
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "FOD • Diagnostic & Ingénierie UDFPS",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Cible : UNPACK/${uiState.selectedDecompiledImgName} • Appui GASTROengine & R.E.C.O.R.E",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+        }
+
+        // Section 1: SCAN & AISCAN Buttons
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "1. Analyse Complète du FOD (SCAN Matériel & AISCAN IA + GASTROengine)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                Text(
+                    text = "• SCAN : Vérifie les éléments extraits par EXTRACTOR et effectue des vérifications poussées sur le téléphone pour identifier ce qui manque concrètement au GSI et pourquoi son FOD ne marche pas.\n" +
+                            "• AISCAN : S'appuie sur l'IA gratuite (Gemini / AI Studio avec mécanisme Anti-Quota) et sur GASTROengine pour établir le plan de portage FOD rigoureux.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = onRunScan,
+                        enabled = !uiState.isBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp)
+                            .testTag("btn_fod_scan")
+                    ) {
+                        Icon(imageVector = Icons.Default.Search, contentDescription = "SCAN")
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "SCAN",
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+
+                    Button(
+                        onClick = onRunAiScan,
+                        enabled = !uiState.isBusy,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(54.dp)
+                            .testTag("btn_fod_aiscan")
+                    ) {
+                        Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = "AISCAN")
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "AISCAN",
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+        }
+
+        // Section 2: The 3 FOD Fix Buttons (FOD fix 1, FOD fix 2, FOD fix 3)
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "2. Corrections FOD (FOD fix 1 • FOD fix 2 • FOD fix 3)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.ExtraBold
+                )
+
+                // FOD fix 1: Complete solution
+                Button(
+                    onClick = onApplyFodFix1,
+                    enabled = !uiState.isBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .testTag("btn_fod_fix_1")
+                ) {
+                    Icon(imageVector = Icons.Default.Fingerprint, contentDescription = "FOD fix 1")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(horizontalAlignment = Alignment.Start) {
+                        Text(
+                            text = "FOD fix 1 (Solution Complète Stock-Grade)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Intégration complète RRO + HAL Blobs + Régénération OAT/VDEX/fsv_meta",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+                // FOD fix 2: Workaround / Bidouillage zero-APK-touch
+                Button(
+                    onClick = onApplyFodFix2,
+                    enabled = !uiState.isBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .testTag("btn_fod_fix_2")
+                ) {
+                    Icon(imageVector = Icons.Default.Build, contentDescription = "FOD fix 2")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(horizontalAlignment = Alignment.Start) {
+                        Text(
+                            text = "FOD fix 2 (Solution Bidouillage • Sans Modif APK)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Hooks Init RC + Keylayout + Props Phh-Treble sur l'OS unpacké sans repacker",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+                // FOD fix 3: AI + GASTROengine + R.E.C.O.R.E
+                Button(
+                    onClick = onApplyFodFix3,
+                    enabled = !uiState.isBusy,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp)
+                        .testTag("btn_fod_fix_3")
+                ) {
+                    Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = "FOD fix 3")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(horizontalAlignment = Alignment.Start) {
+                        Text(
+                            text = "FOD fix 3 (Assisté par l'IA + GASTROengine + R.E.C.O.R.E)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "StructureAligner + Overlays RRO + VintfReconciler + Preuve Z3 Anti-Bootloop",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+                if (!portResult?.lastAppliedFodFixMode.isNullOrBlank()) {
+                    Surface(
+                        color = Color(0xFF0E2A1E),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "✓ Dernier Fix FOD appliqué : ${portResult?.lastAppliedFodFixMode}\n" +
+                                    "Moteur de fond R.E.C.O.R.E : Z3=${recore?.smtStatus ?: "SAT"} (Score Boot=${recore?.bootConfidenceScore ?: 100}/100)",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFF69F0AE),
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onNavigateToExtractor,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("EXTRACTOR")
+                    }
+                    OutlinedButton(
+                        onClick = onNavigateToCreation,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("CREATION (Make IMG/ROM)")
+                    }
+                }
+            }
+        }
+
+        // Section 3: AI SCAN Report (AiPortingAgent + Anti-Quota + GASTROengine)
+        if (aiScan != null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.Fingerprint,
-                            contentDescription = "FOD Suite",
-                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                            modifier = Modifier.size(26.dp)
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "AISCAN Report",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "3. Partie FOD (Scan FOD • TOTAL SCAN • FOD Fix • FOD Fix PRO)",
+                                text = "Rapport AISCAN (AiPortingAgent & GASTROengine)",
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                                fontWeight = FontWeight.ExtraBold
                             )
                             Text(
-                                text = "Analyse comparative OS Unpacké <-> Système Hôte et correction FOD sans risque de bootloop",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
+                                text = "Moteur : ${aiScan.engineModelUsed} • Anti-Quota : ${aiScan.antiQuotaState}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                     }
-
-                    // Row 1: Scan FOD & TOTAL SCAN
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = onScanFodStruct,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("fod_scan_struct_button")
-                        ) {
-                            Icon(Icons.Default.Science, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Scan FOD (OS Unpacké)", fontWeight = FontWeight.Bold)
-                        }
-
-                        Button(
-                            onClick = onRunFodTotalComparativeScan,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("fod_total_scan_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondary
-                            )
-                        ) {
-                            Icon(Icons.Default.CompareArrows, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("TOTAL SCAN (Comparatif)", fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.2f))
 
                     Text(
-                        text = "• FOD Fix (Sans Repack • Sans modifier les APKs internes) : Applique les fixes et corrections FOD au GSI unpacké sans le repacker et sans modifier les APKs internes (0 risque de bootloop).\n" +
-                            "• En parallèle : FOD Fix PRO (Implémentation Stock ROM Totale) : Fixe le FOD comme si le FOD de l'img unpacké était implémenté comme une vraie Stock ROM (refonte totale du FOD dans l'img unpacké).",
+                        text = "Cause Racine Identifiée :\n${aiScan.rootCauseAnalysis}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.9f)
+                        fontWeight = FontWeight.Medium
                     )
 
-                    // Row 2: FOD Fix (Unpack-only, zero APK touch) & FOD Fix PRO (Stock ROM Total Implementation)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = onApplyFodFixUnpackOnlyZeroApk,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("fod_fix_unpack_only_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary
-                            )
-                        ) {
-                            Icon(Icons.Default.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("FOD Fix (Sans APK / Sans Repack)", fontWeight = FontWeight.Bold)
-                        }
+                    HorizontalDivider()
+                    Text(
+                        text = "Diagnostic Technique GASTROengine (Rust) :",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    aiScan.gastroRustDiagnosis.forEach { diag ->
+                        Text(
+                            text = "  • $diag",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
 
-                        Button(
-                            onClick = onFixFodCoherentStock,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("fod_fix_pro_button"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.tertiary
+                    HorizontalDivider()
+                    Text(
+                        text = "Plan de Portage Généré par l'IA & GASTROengine :",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.surface,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = aiScan.rawAiMarkdown,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Section 4: Complete Hardware & EXTRACT SCAN Report
+        if (totalScan != null || fodStruct != null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Résultat du SCAN Complet (GSI Unpacké <-> EXTRACT & Téléphone)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+
+                    if (fodStruct != null) {
+                        Text(
+                            text = "Pourquoi le FOD du GSI ne marche pas :\n${fodStruct.rootCauseWhyFodWontWork}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        HorizontalDivider()
+                        Text(
+                            text = "Analyse des 5 Couches Matérielles & Logicielles FOD :",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        fodStruct.layerNodes.forEach { layer ->
+                            Text(
+                                text = "• [Couche ${layer.layerOrder}] ${layer.layerName} (${if (layer.presentInGsi) "PRÉSENT" else "MANQUANT"})\n" +
+                                        "  Raison échec : ${layer.whyItFailsOnVendor}\n" +
+                                        "  Correctif : ${layer.actionPlanStep}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace
                             )
-                        ) {
-                            Icon(Icons.Default.Verified, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("FOD Fix PRO (Stock ROM)", fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    // Secondary buttons: Inspect Mechanism & Navigate to R.E.C.O.R.E / Compilator
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = onInspectGsiMechanism,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("porter_inspect_mech_button")
-                        ) {
-                            Icon(Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Inspecter GSI <-> Vendor")
-                        }
-
-                        OutlinedButton(
-                            onClick = onNavigateToRecore,
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("porter_goto_recore_button")
-                        ) {
-                            Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Ouvrir R.E.C.O.R.E ->")
-                        }
-                    }
-
-                    if (!portResult?.lastAppliedFodFixMode.isNullOrBlank()) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
+                    if (totalScan != null) {
+                        if (totalScan.systemToVendorBridgeSummary.isNotBlank()) {
+                            Surface(
+                                color = Color(0xFF0E2A1E),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
                                 Text(
-                                    text = "Dernière Opération FOD Appliquée : ${portResult?.lastAppliedFodFixMode}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF2E7D32)
+                                    text = "Pont Dynamique /system <-> /vendor de votre téléphone :\n${totalScan.systemToVendorBridgeSummary}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = Color(0xFF69F0AE),
+                                    modifier = Modifier.padding(10.dp)
                                 )
+                            }
+                        }
+
+                        if (totalScan.hostSystemLogicVerified.isNotEmpty()) {
+                            HorizontalDivider()
+                            Text(
+                                text = "1. Vérification de la Partition SYSTÈME (/system, /product, /system_ext) de votre téléphone :",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            totalScan.hostSystemLogicVerified.forEach { sysLine ->
                                 Text(
-                                    text = "Sortie Dossier : ${portResult?.portOutputDirectoryPath}\nStatut Image : ${portResult?.portedSystemImgPath}",
+                                    text = "  ✓ [SYSTEM] $sysLine",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
                             }
                         }
-                    }
-                }
-            }
-        }
 
-        // 4. DIAGNOSTIC TABS & DETAILED REPORTS
-        if (portResult != null) {
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    tabs.forEachIndexed { index, title ->
-                        FilterChip(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            label = { Text(title) },
-                            modifier = Modifier.testTag("porter_tab_$index")
-                        )
-                    }
-                }
-            }
-
-            when (selectedTab) {
-                0 -> {
-                    // Show TOTAL SCAN Comparative Report if available
-                    portResult.totalScanReport?.let { totalScan ->
-                        item {
-                            FodTotalComparativeScanCard(totalScan)
-                        }
-                    }
-                    // Show FODstruct Report
-                    portResult.fodStructReport?.let { fodStruct ->
-                        item {
-                            FodStructOverviewCard(fodStruct)
-                        }
-                        items(fodStruct.layerNodes) { layer ->
-                            FodLayerNodeCard(layer)
-                        }
-                    }
-                }
-
-                1 -> {
-                    portResult.gsiMechanismReport?.let { mech ->
-                        item {
-                            GsiMechanismReportCard(mech)
-                        }
-                    }
-                }
-
-                2 -> {
-                    items(portResult.proprietaryBlobs) { blob ->
-                        ProprietaryBlobItemCard(blob)
-                    }
-                }
-
-                3 -> {
-                    item {
-                        DeviceTreeMakefileAndHistoryCard(
-                            makefileContent = portResult.lineageDeviceMkContent,
-                            portHistory = portHistory
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FodTotalComparativeScanCard(report: FodTotalComparativeScanReport) {
-    val readyCount = report.comparativeItems.count { it.readyInUnpacked }
-    val totalCount = report.comparativeItems.size.coerceAtLeast(1)
-    val readyPct = (readyCount * 100) / totalCount
-
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "TOTAL SCAN Comparatif (OS Unpacké <-> Système Hôte + Base Tucana)",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (readyPct == 100) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        text = "$readyPct% Prêt ($readyCount/$totalCount)",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            }
-
-            Text(
-                text = "• OS Unpacké : ${report.unpackedOsName}\n" +
-                    "• Système Hôte : ${report.hostSystemDeviceSummary}\n" +
-                    "• Référence Base : ${report.baseReferenceSummary}\n" +
-                    "• Liaison Moteurs : ${report.coherenceWithScannerAndCompare}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-
-            HorizontalDivider()
-
-            Text(
-                text = "Éléments comparés (OS Unpacké vs Système Hôte / Base Tucana) :",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold
-            )
-
-            report.comparativeItems.forEach { item ->
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        if (totalScan.hostVendorLogicVerified.isNotEmpty()) {
+                            HorizontalDivider()
                             Text(
-                                text = "[${item.componentCategory}] ${item.elementName}",
+                                text = "2. Vérification de la Partition VENDOR (/vendor, /odm, /sys, /dev) de votre téléphone :",
                                 style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.weight(1f)
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.secondary
                             )
-                            Text(
-                                text = item.unpackedOsStatus,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                color = if (item.readyInUnpacked) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
-                            )
+                            totalScan.hostVendorLogicVerified.forEach { venLine ->
+                                Text(
+                                    text = "  ✓ [VENDOR] $venLine",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
+
+                        HorizontalDivider()
                         Text(
-                            text = "Source Hôte/Base : ${item.hostOrBaseStatus}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "Action de Portage : ${item.portActionRequired}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider()
-
-            Text(
-                text = "Éléments Manquants à Porter :",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-            report.missingElementsToPort.forEach { missing ->
-                Text(
-                    text = "• $missing",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-
-            HorizontalDivider()
-
-            Text(
-                text = "Stratégie de Portage FOD Recommandée :",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-            report.fodPortingStrategySteps.forEach { step ->
-                Text(
-                    text = step,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FodStructOverviewCard(report: FodStructScanReport) {
-    val activeLayers = report.layerNodes.count { it.presentInGsi }
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Scan FOD (OS Unpacké : ${report.scannedGsiName})",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Architecture : ${report.fodArchitectureType} • Topologie : ${report.topologyLabel}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (activeLayers == report.layerNodes.size) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary
-                ) {
-                    Text(
-                        text = "$activeLayers/${report.layerNodes.size} Couches",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            Text(
-                text = "Diagnostic : ${report.rootCauseWhyFodWontWork}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            if (report.stockGradeFixApplied && report.stockGradeFixSummary.isNotEmpty()) {
-                HorizontalDivider()
-                Text(
-                    text = "Résumé du Fix FOD Appliqué :",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF2E7D32)
-                )
-                report.stockGradeFixSummary.forEach { line ->
-                    Text(
-                        text = "✓ $line",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FodLayerNodeCard(layer: FodLayerNode) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        imageVector = if (layer.presentInGsi) Icons.Default.CheckCircle else Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = if (layer.presentInGsi) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = "Couche ${layer.layerOrder} : ${layer.layerName}",
-                            style = MaterialTheme.typography.bodyMedium,
+                            text = "Éléments Manquants Concrètement au GSI (${totalScan.missingElementsToPort.size}) :",
+                            style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        Text(
-                            text = layer.componentPath,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (layer.presentInGsi) Color(0xFF2E7D32).copy(alpha = 0.15f)
-                    else MaterialTheme.colorScheme.errorContainer
-                ) {
-                    Text(
-                        text = if (layer.presentInGsi) "PRÉSENT" else "À CORRIGER",
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (layer.presentInGsi) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onErrorContainer
-                    )
-                }
-            }
-            Text(
-                text = "État : ${layer.currentArchitectureDetail}",
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text(
-                text = "Action : ${layer.actionPlanStep}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-    }
-}
+                        totalScan.missingElementsToPort.forEach { miss ->
+                            Text(
+                                text = "  ✗ $miss",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
 
-@Composable
-private fun GsiMechanismReportCard(report: GsiMechanismAndVendorReport) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = "Mécanisme GSI (${report.gsiName}) • Android ${report.gsiAndroidRelease} (SDK ${report.gsiSdkLevel})",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "Architecture Treble : ${report.trebleArchitecture} • VNDK : ${report.gsiVndkVersion}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            HorizontalDivider()
-            Text(
-                text = "Interfaces HAL Comparées (${report.vendorHalDiffs.size}) :",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold
-            )
-            report.vendorHalDiffs.forEach { diff ->
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(8.dp)) {
+                        HorizontalDivider()
                         Text(
-                            text = "${diff.halName} @${diff.version} (${diff.transport}) — ${diff.statusLabel}",
+                            text = "Tableau Comparatif (GSI <-> /system + /vendor du Téléphone) :",
                             style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontWeight = FontWeight.Bold
                         )
-                        Text(
-                            text = diff.differenceExplanation,
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                        totalScan.comparativeItems.forEach { item ->
+                            Text(
+                                text = "• [${item.componentCategory}] ${item.elementName}\n  GSI=${item.unpackedOsStatus} | Téléphone=${item.hostOrBaseStatus}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProprietaryBlobItemCard(blob: ProprietaryBlobItem) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        imageVector = Icons.Default.Storage,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = blob.relativePath,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.secondaryContainer
-                ) {
-                    Text(
-                        text = blob.subsystem,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-            }
-            Text(
-                text = "Arch : ${blob.elfArch} • DT_NEEDED : ${blob.dtNeededLibs.joinToString(", ")}",
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun DeviceTreeMakefileAndHistoryCard(
-    makefileContent: String,
-    portHistory: List<PortHistoryEntity>
-) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.Tune,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Configuration LineageOS device_tucana.mk & Historique de Portage",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                    .padding(10.dp)
-            ) {
-                Text(
-                    text = makefileContent,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-            if (portHistory.isNotEmpty()) {
-                HorizontalDivider()
-                Text(
-                    text = "Historique des Portages (${portHistory.size}) :",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                portHistory.take(5).forEach { entry ->
-                    Text(
-                        text = "• ${entry.stockDeviceName} -> ${entry.gsiTargetName} | Blobs=${entry.blobsTransplanted} | FOD=${entry.fodStatus}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace
-                    )
                 }
             }
         }

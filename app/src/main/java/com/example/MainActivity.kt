@@ -26,8 +26,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Psychology
@@ -69,6 +71,8 @@ import com.example.ui.components.TopSystemStatusBar
 import com.example.ui.screens.AutoPorterScreen
 import com.example.ui.screens.CompilerScreen
 import com.example.ui.screens.ConsoleHistoryScreen
+import com.example.ui.screens.CreationScreen
+import com.example.ui.screens.ExtractorScreen
 import com.example.ui.screens.GeneratorScreen
 import com.example.ui.screens.HelpScreen
 import com.example.ui.screens.KeyMakerScreen
@@ -114,14 +118,16 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
         }
     }
 
-    // Sidebar items: Key Maker, Sign Pro, Generator, Compilator (Unpack & Repack), Porting (GSI), R.E.C.O.R.E
+    // Sidebar items: Key Maker, Sign Pro, Generator, Compilator (Unpack & Repack), EXTRACTOR, PORTER, CREATION
+    // (RECORE is removed from visible navigation and runs in the background alongside GASTROengine)
     val sidebarModules = listOf(
         KitchenTab.KEY_MAKER,
         KitchenTab.SIGN_PRO,
         KitchenTab.GENERATOR,
         KitchenTab.COMPILER,
+        KitchenTab.EXTRACTOR,
         KitchenTab.AUTO_PORTER,
-        KitchenTab.RECORE
+        KitchenTab.CREATION
     )
 
     // 3-Pane Bottom Navigation Bar:
@@ -164,19 +170,19 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                             ) {
                                 androidx.compose.foundation.Image(
                                     painter = androidx.compose.ui.res.painterResource(id = R.drawable.ic_romforger_bolt_gear),
-                                    contentDescription = "Logo ROM Forge",
+                                    contentDescription = "Logo GASTRO",
                                     modifier = Modifier.size(36.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
                                 Text(
-                                    text = "ROM FORGE v3.0",
+                                    text = "GASTRO",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.ExtraBold
                                 )
                                 Text(
-                                    text = "R.E.C.O.R.E • UKA & GSI Porter",
+                                    text = "GASTROengine (Rust) • R.E.C.O.R.E Core",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -192,16 +198,17 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                         ) {
                             Column(modifier = Modifier.padding(10.dp)) {
                                 Text(
-                                    text = "Espaces ROM_FORGE Actifs :",
+                                    text = "Espaces GASTRO Actifs :",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.secondary
                                 )
                                 Text(
                                     text = "• UNPACK/ (${uiState.availableDecompiledImgs.size} systèmes)\n" +
-                                            "• PACKED/ (Images .img & vbmeta)\n" +
-                                            "• KEY/ & KEY/Data/ (Clés & Rapports)\n" +
-                                            "• PORT/ (GSI, HAL Vendor & FODstruct)",
+                                            "• EXTRACT/ (${uiState.extractedFilesCount} fichiers ADN téléphone)\n" +
+                                            "• PORT/ (PORTER, PORTERPLAN & FOD 1/2/3)\n" +
+                                            "• CREATION/ & PACKED/ (.img & ROM .zip)\n" +
+                                            "• KEY/ & KEY/Data/ (Clés & Rapports)",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -533,22 +540,35 @@ fun RomForgeKitchenApp(viewModel: RomKitchenViewModel = viewModel()) {
                                     onImportImgUri = viewModel::importAndInspectExternalImg
                                 )
 
+                                KitchenTab.EXTRACTOR -> ExtractorScreen(
+                                    uiState = uiState,
+                                    onExecuteExtractMe = viewModel::executeExtractorExtractMe,
+                                    onNavigateToPorter = { viewModel.selectTab(KitchenTab.AUTO_PORTER) },
+                                    onNavigateToCreation = { viewModel.selectTab(KitchenTab.CREATION) }
+                                )
+
                                 KitchenTab.AUTO_PORTER -> AutoPorterScreen(
                                     uiState = uiState,
                                     portHistory = portHistory,
                                     onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
                                     onPickCustomSafTree = viewModel::selectCustomDecompiledDirectoryUri,
-                                    onExecuteExtractMe = viewModel::executeExtractMeForPorting,
-                                    onExecuteUseBaseLineageTucana = viewModel::executeUseBaseLineageTucana,
                                     onExecutePortageToUnpackedGsi = viewModel::executeGsiToSystemAutoPort,
-                                    onInspectGsiMechanism = viewModel::inspectGsiVendorMechanism,
-                                    onScanFodStruct = viewModel::scanGsiFodStruct,
-                                    onRunFodTotalComparativeScan = viewModel::runPorterTotalComparativeFodScan,
-                                    onApplyFodFixUnpackOnlyZeroApk = viewModel::applyFodFixUnpackOnlyZeroApk,
-                                    onFixFodCoherentStock = viewModel::applyCoherentStockGradeFodFix,
-                                    onFixFodOverlayOnlyZeroSign = viewModel::applyOverlayOnlyZeroSignFodFix,
-                                    onNavigateToCompiler = { viewModel.selectTab(KitchenTab.COMPILER) },
-                                    onNavigateToRecore = { viewModel.selectTab(KitchenTab.RECORE) }
+                                    onRunPorterPlanAnalysis = viewModel::runGastroPorterPlanAnalysis,
+                                    onRunFodCompleteScan = viewModel::runPorterTotalComparativeFodScan,
+                                    onRunFodAiScan = viewModel::runGastroAiFodScan,
+                                    onApplyFodFix1Complete = viewModel::applyCoherentStockGradeFodFix,
+                                    onApplyFodFix2Workaround = viewModel::applyFodFixUnpackOnlyZeroApk,
+                                    onApplyFodFix3AiAndGastroEngine = viewModel::applyFodFix3AiAndGastroEngine,
+                                    onNavigateToExtractor = { viewModel.selectTab(KitchenTab.EXTRACTOR) },
+                                    onNavigateToCreation = { viewModel.selectTab(KitchenTab.CREATION) }
+                                )
+
+                                KitchenTab.CREATION -> CreationScreen(
+                                    uiState = uiState,
+                                    onSelectDecompiledImg = viewModel::selectDecompiledImgFolder,
+                                    onExecuteMakeImg = viewModel::executeCreationMakeImg,
+                                    onExecuteMakeRomZip = viewModel::executeCreationMakeRomZip,
+                                    onNavigateToExtractor = { viewModel.selectTab(KitchenTab.EXTRACTOR) }
                                 )
 
                                 KitchenTab.RECORE -> RecoreScreen(
@@ -594,7 +614,9 @@ private fun KitchenTab.icon(): ImageVector = when (this) {
     KitchenTab.SIGN_PRO -> Icons.Default.Bolt
     KitchenTab.GENERATOR -> Icons.Default.Memory
     KitchenTab.COMPILER -> Icons.Default.Build
+    KitchenTab.EXTRACTOR -> Icons.Default.Download
     KitchenTab.AUTO_PORTER -> Icons.Default.AccountTree
+    KitchenTab.CREATION -> Icons.Default.AutoAwesome
     KitchenTab.RECORE -> Icons.Default.Psychology
     KitchenTab.CONSOLE -> Icons.Default.Terminal
     KitchenTab.HELP -> Icons.Default.Settings
@@ -605,9 +627,11 @@ private fun KitchenTab.sidebarTitle(): String = when (this) {
     KitchenTab.SIGN_PRO -> "Sign Pro"
     KitchenTab.GENERATOR -> "Generator"
     KitchenTab.COMPILER -> "Compilator (Unpack & Repack)"
-    KitchenTab.AUTO_PORTER -> "Porting (Portage de GSI)"
-    KitchenTab.RECORE -> "R.E.C.O.R.E (Cerveau Rust/Z3)"
-    KitchenTab.CONSOLE -> "Console & Terminal"
+    KitchenTab.EXTRACTOR -> "EXTRACTOR (ExtractMe -> EXTRACT)"
+    KitchenTab.AUTO_PORTER -> "PORTER (PORT • PORTERPLAN • FOD)"
+    KitchenTab.CREATION -> "CREATION (Make IMG & Make ROM)"
+    KitchenTab.RECORE -> "R.E.C.O.R.E (Moteur de Fond)"
+    KitchenTab.CONSOLE -> "Console & ShellOrchestrator"
     KitchenTab.HELP -> "Paramètres & Aides"
 }
 
@@ -616,7 +640,9 @@ private fun KitchenTab.shortLabel(): String = when (this) {
     KitchenTab.SIGN_PRO -> "Sign Pro"
     KitchenTab.GENERATOR -> "Generator"
     KitchenTab.COMPILER -> "Compilator"
-    KitchenTab.AUTO_PORTER -> "Porting"
+    KitchenTab.EXTRACTOR -> "EXTRACTOR"
+    KitchenTab.AUTO_PORTER -> "PORTER"
+    KitchenTab.CREATION -> "CREATION"
     KitchenTab.RECORE -> "R.E.C.O.R.E"
     KitchenTab.CONSOLE -> "Console"
     KitchenTab.HELP -> "Paramètres"
@@ -627,8 +653,10 @@ private fun KitchenTab.subtitle(): String = when (this) {
     KitchenTab.SIGN_PRO -> "Signature APK, Clé Entière & XML (-> KEY/Data/)"
     KitchenTab.GENERATOR -> "Compilation dex2oat .odex/.vdex & fs-verity"
     KitchenTab.COMPILER -> "Unpack & Repack UKA EXT4/EROFS (-> UNPACK / PACKED)"
-    KitchenTab.AUTO_PORTER -> "Mécanisme GSI/Vendor, Scan FODstruct & Fix FOD Stock"
-    KitchenTab.RECORE -> "DAG, Symboles ELF64, Shims, Sandbox ARM64 & Solveur Z3 SMT"
-    KitchenTab.CONSOLE -> "Historique, Logs entiers, Progression & Commandes"
-    KitchenTab.HELP -> "Thème Clair/Sombre/Système, Aides, Règles & Changelog"
+    KitchenTab.EXTRACTOR -> "ExtractMe : ADN Téléphone, HALs & Blobs (-> EXTRACT/)"
+    KitchenTab.AUTO_PORTER -> "PORT, PORTERPLAN & FOD (SCAN, AISCAN, Fix 1/2/3)"
+    KitchenTab.CREATION -> "GASTROengine : Make IMG (.img) & Make ROM (.zip flashable)"
+    KitchenTab.RECORE -> "Moteur de fond : SCANNER, COMPARE & Z3 SMT"
+    KitchenTab.CONSOLE -> "Historique, Logs entiers, Progression & ShellOrchestrator"
+    KitchenTab.HELP -> "Thème Clair/Sombre/Système, PDF Technique & Architecture"
 }

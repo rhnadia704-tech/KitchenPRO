@@ -114,11 +114,14 @@ data class TotalScanComparativeItem(
 data class FodTotalComparativeScanReport(
     val unpackedOsName: String,
     val hostSystemDeviceSummary: String,
-    val baseReferenceSummary: String = "LineageOS android_device_xiaomi_tucana (lineage-24.0 / SM6150)",
+    val baseReferenceSummary: String = "Analyse Dynamique Live : /system (/product, /system_ext) + /vendor (/odm, /sys, /dev) du téléphone",
     val comparativeItems: List<TotalScanComparativeItem>,
     val missingElementsToPort: List<String>,
     val fodPortingStrategySteps: List<String>,
-    val coherenceWithScannerAndCompare: String
+    val coherenceWithScannerAndCompare: String,
+    val hostSystemLogicVerified: List<String> = emptyList(),
+    val hostVendorLogicVerified: List<String> = emptyList(),
+    val systemToVendorBridgeSummary: String = ""
 )
 
 data class VirtualDeviceTreePortResult(
@@ -139,6 +142,7 @@ data class VirtualDeviceTreePortResult(
     val fodStructReport: FodStructScanReport? = null,
     val sourceExtractionSummary: PorterSourceExtractionSummary? = null,
     val totalScanReport: FodTotalComparativeScanReport? = null,
+    val hostSystemAndVendorDna: HostSystemAndVendorFodDna? = null,
     val lastAppliedFodFixMode: String = ""
 )
 
@@ -243,25 +247,39 @@ class AutoPorterEngine(private val workspaceDir: File) {
             }
         }
 
-        // Write live host properties snapshot into extract_me_host/host_live_props.prop
-        val liveProps = probeLiveAndroidHostProperties()
+        // Dynamically probe both Host /system (/product, /system_ext) AND Host /vendor (/odm, /sys, /dev) FOD logic
+        val extractRoot = File(workspaceDir, "EXTRACT").apply { mkdirs() }
+        val dynamicDna = HostSystemAndVendorFodProbe.probePhoneSystemAndVendorFodLogic(
+            extractRootDir = extractRoot,
+            stockVendorRefDir = stockVendor,
+            forceRefresh = true,
+            onLog = onLog
+        )
+
+        // Write live host properties snapshot (System + Vendor) into extract_me_host/host_live_props.prop
+        val liveProps = probeLiveAndroidHostProperties() + dynamicDna.hostSystemProps + dynamicDna.hostVendorProps + dynamicDna.dynamicBuildPropsToInject
         val propLines = liveProps.entries.joinToString("\n") { "${it.key}=${it.value}" }
         File(extractMeDir, "host_live_props.prop").writeText(propLines + "\n")
-        sysCount++
-        preview.add("[LIVE-PROPS] ${liveProps.size} propriétés matérielles extraites de l'OS hôte (${Build.BRAND} ${Build.DEVICE})")
+        File(extractMeDir, dynamicDna.dynamicInitRcScriptName).writeText(dynamicDna.dynamicInitRcScriptContent)
+        File(extractMeDir, dynamicDna.dynamicKeylayoutFileName).writeText(dynamicDna.dynamicKeylayoutContent)
+        sysCount += 3 + dynamicDna.hostSystemInitRcFiles.size + dynamicDna.hostSystemKeylayoutFiles.size + dynamicDna.hostSystemOverlaysFound.size
+        venCount += dynamicDna.hostVendorInitRcFiles.size + dynamicDna.hostVendorVintfHals.size + dynamicDna.liveKernelSysfsNodesFound.size
+
+        preview.add("[SYSTEM-PROBE] ${dynamicDna.hostSystemRomType} | ${dynamicDna.hostSystemProps.size} props /system & /product | Keylayout=${dynamicDna.dynamicKeylayoutFileName} (key ${dynamicDna.hostSystemKeycodeDetected})")
+        preview.add("[VENDOR-PROBE] Capteur=${dynamicDna.resolvedSensorVendor} @ (${dynamicDna.resolvedCenterX},${dynamicDna.resolvedCenterY}) | HBM=${dynamicDna.resolvedHbmSysfsNode} (${dynamicDna.resolvedHbmOnValue})")
 
         if (combineWithUseBase) {
             populateUseBaseLineageTucanaTree(stockVendor)
-            preview.add("[BASE-TUCANA] Base LineageOS 24.0 Xiaomi Tucana (SM6150) combinée en parallèle pour résultat optimal")
+            // Override static build.prop in stockVendor with the phone's real dynamically probed System+Vendor properties!
+            val mergedLines = (parseBuildProp(File(stockVendor, "build.prop")) + dynamicDna.dynamicBuildPropsToInject)
+                .entries.joinToString("\n") { "${it.key}=${it.value}" }
+            File(stockVendor, "build.prop").writeText(mergedLines + "\n")
+            preview.add("[DYNAMIC-MERGE] Logique réelle /system + /vendor du téléphone fusionnée avec la base matérielle de secours")
         }
 
-        val modeLabel = if (combineWithUseBase) {
-            "ExtractMe (Root=${if (rootOk) "OUI" else "Live"}) + USE Base (LineageOS 24.0 Tucana Combinés)"
-        } else {
-            "ExtractMe Seul (Composants System & Vendor de la ROM actuelle)"
-        }
+        val modeLabel = "Extraction Dynamique /system + /vendor (${dynamicDna.hostBrand} ${dynamicDna.hostDevice} • Root=${if (rootOk) "OUI" else "Live System+Vendor"})"
 
-        onLog("[EXTRACT-ME] Extraction terminée : $sysCount éléments System, $venCount éléments Vendor extraits dans ${extractMeDir.absolutePath}.")
+        onLog("[EXTRACT-ME] Extraction Dynamique Système + Vendor terminée : $sysCount éléments System (/system, /product, /system_ext) et $venCount éléments Vendor (/vendor, /sys, /dev) extraits.")
         PorterSourceExtractionSummary(
             extractMeActive = true,
             useBaseTucanaActive = combineWithUseBase,
@@ -365,87 +383,104 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): FodTotalComparativeScanReport = withContext(Dispatchers.IO) {
         val gsiSystem = resolveGsiSourceDir(targetUnpackedGsiDir)
         val stockVendor = resolveStockVendorRefDir()
+        val extractRoot = File(workspaceDir, "EXTRACT").apply { mkdirs() }
         populateUseBaseLineageTucanaTree(stockVendor)
+
+        // Probe BOTH Host /system (/product, /system_ext) AND Host /vendor (/odm, /sys, /dev) dynamically!
+        val dna = HostSystemAndVendorFodProbe.probePhoneSystemAndVendorFodLogic(
+            extractRootDir = extractRoot,
+            stockVendorRefDir = stockVendor,
+            forceRefresh = false,
+            onLog = onLog
+        )
+
         val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = gsiSystem,
             autoHealSarConflicts = false,
             onLog = onLog
         )
         val pfx = topology.systemPrefixRel
-        onLog("[TOTAL-SCAN-FOD] Scan comparatif TOTAL SCAN en cours : OS Unpacké (${gsiSystem.name}) <-> OS Hôte (${Build.BRAND} ${Build.DEVICE}) + Base LineageOS 24.0 Tucana...")
+        onLog("[TOTAL-SCAN-FOD] Scan Dynamique Complet : GSI Unpacké (${gsiSystem.name}) <-> Partition /system (${dna.hostSystemRomType}) + Partition /vendor (${dna.hostBrand} ${dna.hostDevice})...")
 
-        val hasInitRc = File(topology.initRcDir, "init.tucana.fod.rc").exists()
-        val hasKeylayout = File(topology.keylayoutDir, "uinput-goodix.kl").exists()
-        val hasSysconfig = File(topology.etcDir, "sysconfig/xiaomi_tucana_fod_config.xml").exists()
+        val hasDynamicInitRc = File(topology.initRcDir, dna.dynamicInitRcScriptName).exists() ||
+            File(topology.initRcDir, "init.tucana.fod.rc").exists()
+        val hasDynamicKeylayout = File(topology.keylayoutDir, dna.dynamicKeylayoutFileName).exists() ||
+            File(topology.keylayoutDir, "uinput-goodix.kl").exists()
+        val hasSysconfig = File(topology.etcDir, "sysconfig/xiaomi_${dna.hostDevice}_fod_config.xml").exists() ||
+            File(topology.etcDir, "sysconfig/xiaomi_tucana_fod_config.xml").exists()
         val hasHwOverlay = File(topology.productOverlayDir, "TrebleHardwareOverlay.apk").exists() ||
-                File(gsiSystem, "ROM_FORGE_META/fod_overlays/TrebleHardwareOverlay.apk").exists()
+            File(gsiSystem, "ROM_FORGE_META/fod_overlays/TrebleHardwareOverlay.apk").exists()
         val hasSysUiOverlay = File(topology.productOverlayDir, "SystemUIUdfpsTucanaOverlay.apk").exists() ||
-                File(gsiSystem, "ROM_FORGE_META/fod_overlays/SystemUIUdfpsTucanaOverlay.apk").exists()
+            File(gsiSystem, "ROM_FORGE_META/fod_overlays/SystemUIUdfpsTucanaOverlay.apk").exists()
         val buildPropText = if (topology.mainBuildPropFile.exists()) topology.mainBuildPropFile.readText() else ""
-        val hasFodProps = buildPropText.contains("ro.hardware.fp.fod=true") && buildPropText.contains("persist.sys.phh.fod.xiaomi=true")
+        val hasFodProps = buildPropText.contains("ro.hardware.fp.fod=true") &&
+            buildPropText.contains("${dna.resolvedCenterX},${dna.resolvedCenterY}")
         val hasXiaomiFpSo = File(topology.lib64Dir, "vendor.xiaomi.hardware.fingerprintextension@1.0.so").exists()
         val hasGoodixSo = File(topology.lib64Dir, "vendor.goodix.hardware.biometrics.fingerprint@2.1.so").exists()
         val hasDisplayFeatureSo = File(topology.lib64Dir, "vendor.xiaomi.hardware.displayfeature@1.0.so").exists()
 
         val items = listOf(
             TotalScanComparativeItem(
-                componentCategory = "SYSFS_DRM_HBM",
-                elementName = "/${pfx}etc/init/init.tucana.fod.rc (Machine à états HBM 0x20000 & disp_param)",
-                unpackedOsStatus = if (hasInitRc) "PRÉSENT DANS UNPACK" else "MANQUANT DANS UNPACK",
-                hostOrBaseStatus = "DISPONIBLE (LineageOS 24.0 Tucana + Host DRM)",
-                portActionRequired = "Injecter init.tucana.fod.rc avec triggers on init / on boot / on property:sys.udfps.hbm.state",
-                readyInUnpacked = hasInitRc
-            ),
-            TotalScanComparativeItem(
-                componentCategory = "INIT_RC_KEYLAYOUT",
-                elementName = "/${pfx}usr/keylayout/uinput-goodix.kl (Key 338 SYSTEM_NAVIGATION_UP)",
-                unpackedOsStatus = if (hasKeylayout) "PRÉSENT DANS UNPACK" else "MANQUANT DANS UNPACK",
-                hostOrBaseStatus = "DISPONIBLE (Base Tucana & Host Input)",
-                portActionRequired = "Greffer uinput-goodix.kl pour mapper l'appui optique Goodix GF9518 vers SystemUI",
-                readyInUnpacked = hasKeylayout
-            ),
-            TotalScanComparativeItem(
-                componentCategory = "BUILD_PROP_SELINUX",
-                elementName = "/${pfx}build.prop (ro.hardware.fp.fod, persist.sys.phh.fod.xiaomi, X_Y=540,1918)",
-                unpackedOsStatus = if (hasFodProps) "CONFIGURÉ DANS UNPACK" else "ABSENT DU BUILD.PROP",
-                hostOrBaseStatus = "DISPONIBLE (Propriétés Stock/Lineage Tucana SM6150)",
-                portActionRequired = "Ajouter les clés FOD/HBM en fin de build.prop sur bloc Copy-on-Write (CoW)",
-                readyInUnpacked = hasFodProps
-            ),
-            TotalScanComparativeItem(
-                componentCategory = "OVERLAY_RRO",
-                elementName = "TrebleHardwareOverlay.apk & SystemUIUdfpsTucanaOverlay.apk + sysconfig UDFPS",
-                unpackedOsStatus = if (hasSysconfig && hasHwOverlay && hasSysUiOverlay) "PRÉSENT DANS UNPACK" else "MANQUANT DANS UNPACK",
-                hostOrBaseStatus = "DISPONIBLE (LineageOS 24.0 Tucana RRO #00FFAA)",
-                portActionRequired = "Configurer xiaomi_tucana_fod_config.xml et les Overlays RRO sans modifier les APKs internes",
+                componentCategory = "SYSTEM_UDFPS_AND_RRO",
+                elementName = "Logique /system (${dna.hostSystemRomType}) : Coordonnées (${dna.resolvedCenterX}, ${dna.resolvedCenterY}, R=${dna.resolvedRadiusPx}px) & Overlays RRO",
+                unpackedOsStatus = if (hasSysconfig && hasHwOverlay && hasSysUiOverlay) "ALIGNÉ AVEC /SYSTEM HÔTE" else "MANQUANT / GÉNÉRIQUE DANS GSI",
+                hostOrBaseStatus = "VÉRIFIÉ SUR /system & /product (${dna.hostSystemOverlaysFound.size} overlays + ${dna.hostSystemProps.size} props lues)",
+                portActionRequired = "Greffer les coordonnées exactes (${dna.resolvedCenterX},${dna.resolvedCenterY}) et la logique SystemUI/Framework du téléphone sans corrompre les APKs",
                 readyInUnpacked = hasSysconfig && hasHwOverlay && hasSysUiOverlay
             ),
             TotalScanComparativeItem(
-                componentCategory = "BIOMETRICS_HAL",
-                elementName = "IXiaomiFingerprint@1.0 + IGoodixFingerprintDaemon@2.1 + IDisplayFeature@1.0",
-                unpackedOsStatus = if (hasXiaomiFpSo && hasGoodixSo && hasDisplayFeatureSo) "PONTÉ DANS UNPACK" else "HAL VENDOR NON PONTÉ",
-                hostOrBaseStatus = "DISPONIBLE (ExtractMe / USE Base Tucana)",
-                portActionRequired = "Activer la liaison HwBinder Treble vers les blobs Goodix/Xiaomi sans écraser /system/lib64",
-                readyInUnpacked = hasSysconfig && hasInitRc
+                componentCategory = "SYSTEM_KEYLAYOUT_INPUT",
+                elementName = "/${pfx}usr/keylayout/${dna.dynamicKeylayoutFileName} (Key ${dna.hostSystemKeycodeDetected} -> ${dna.hostSystemKeycodeName})",
+                unpackedOsStatus = if (hasDynamicKeylayout) "PRÉSENT DANS UNPACK" else "MANQUANT DANS UNPACK",
+                hostOrBaseStatus = "EXTRAIT DE /system/usr/keylayout DU TÉLÉPHONE",
+                portActionRequired = "Injecter le keylayout réel du système (${dna.dynamicKeylayoutFileName}, key ${dna.hostSystemKeycodeDetected}) vers SystemUI",
+                readyInUnpacked = hasDynamicKeylayout
+            ),
+            TotalScanComparativeItem(
+                componentCategory = "SYSTEM_AND_VENDOR_INIT_RC",
+                elementName = "/${pfx}etc/init/${dna.dynamicInitRcScriptName} (HBM ${dna.resolvedHbmOnValue} sur ${dna.resolvedHbmSysfsNode} + ${dna.resolvedDimLayerSysfsNode})",
+                unpackedOsStatus = if (hasDynamicInitRc) "PRÉSENT DANS UNPACK" else "MANQUANT DANS UNPACK",
+                hostOrBaseStatus = "SYNTHÉTISÉ DEPUIS /system/etc/init + /vendor/etc/init + /sys",
+                portActionRequired = "Injecter ${dna.dynamicInitRcScriptName} calqué sur les nœuds réels (${dna.resolvedHbmSysfsNode}, ${dna.resolvedTouchFodNode}, ${dna.resolvedFpDevNode})",
+                readyInUnpacked = hasDynamicInitRc
+            ),
+            TotalScanComparativeItem(
+                componentCategory = "SYSTEM_AND_VENDOR_PROPS",
+                elementName = "/${pfx}build.prop (${dna.dynamicBuildPropsToInject.size} propriétés FOD System+Vendor : X_Y=${dna.resolvedCenterX},${dna.resolvedCenterY})",
+                unpackedOsStatus = if (hasFodProps) "SYNCHRONISÉ DANS UNPACK" else "ABSENT DU BUILD.PROP GSI",
+                hostOrBaseStatus = "EXTRAIT EN DIRECT (getprop /system + /vendor)",
+                portActionRequired = "Injecter les ${dna.dynamicBuildPropsToInject.size} propriétés FOD lues sur le système et le vendor du téléphone",
+                readyInUnpacked = hasFodProps
+            ),
+            TotalScanComparativeItem(
+                componentCategory = "VENDOR_VINTF_AND_BLOBS",
+                elementName = "Pont HAL /system <-> /vendor (${dna.resolvedHalInterface} + ${dna.resolvedFpDevNode})",
+                unpackedOsStatus = if (hasSysconfig && hasDynamicInitRc) "PONTÉ AVEC LE VENDOR" else "HAL VENDOR NON RELIÉ AU SYSTÈME GSI",
+                hostOrBaseStatus = "VÉRIFIÉ SUR /vendor/etc/vintf (${dna.hostVendorVintfHals.size} HALs) & /dev (${dna.liveDevNodesFound.size} nœuds)",
+                portActionRequired = "Relier l'UdfpsController du GSI aux interfaces réelles du vendor (${dna.resolvedHalInterface})",
+                readyInUnpacked = (hasXiaomiFpSo && hasGoodixSo && hasDisplayFeatureSo) || (hasSysconfig && hasDynamicInitRc)
             )
         )
 
         val missingList = items.filter { !it.readyInUnpacked }.map { "${it.elementName} -> ${it.portActionRequired}" }
         val strategy = listOf(
-            "1. Source de Portage : Combiner 'ExtractMe' (hal/blobs live) et 'USE Base' (LineageOS 24.0 Xiaomi Tucana SM6150).",
-            "2. Option A — Bouton 'FOD Fix (Unpack Sans Repack • Zéro Modif APK)' : Applique toutes les corrections FOD directement dans le dossier UNPACK sélectionné sans modifier aucun APK interne et sans lancer de repack automatique.",
-            "3. Option B — Bouton 'FOD Fix PRO (Implémentation Stock ROM Totale)' : Refonte complète FOD dans l'image unpackée comme une vraie Stock ROM (APKs système + Overlays RRO + OAT/VDEX/fsv_meta + Blobs + Init RC).",
-            "4. Validation R.E.C.O.R.E : Les moteurs SCANNER (16 rapports) et COMPARE isolent uniquement les nouveaux éléments FOD pour garantir un boot DSU Sideloader sans bootloop."
+            "1. Vérification Double (/system + /vendor) : Le moteur sonde à la fois la partition SYSTÈME (${dna.hostSystemRomType}, ${dna.hostSystemProps.size} props, keylayout ${dna.dynamicKeylayoutFileName} key ${dna.hostSystemKeycodeDetected}, overlays /product/overlay) ET la partition VENDOR (${dna.resolvedSensorVendor}, ${dna.resolvedHbmSysfsNode}, ${dna.resolvedFpDevNode}).",
+            "2. Génération Non-Statique Sur-Mesure : Le script '${dna.dynamicInitRcScriptName}', le keylayout '${dna.dynamicKeylayoutFileName}', les overlays RRO (${dna.resolvedCenterX}, ${dna.resolvedCenterY}, R=${dna.resolvedRadiusPx}) et les ${dna.dynamicBuildPropsToInject.size} propriétés build.prop sont construits dynamiquement à partir de la logique exacte de votre téléphone.",
+            "3. Application Ciblée (FOD Fix 1 / 2 / 3 ou MAKE) : Injecte ce pont exact System <-> Vendor dans UNPACK/${gsiSystem.name} tout en préservant l'intégrité SELinux/VINTF validée par R.E.C.O.R.E."
         )
 
-        onLog("[TOTAL-SCAN-FOD] Comparaison terminée : ${items.count { it.readyInUnpacked }}/${items.size} briques FOD actives dans ${gsiSystem.name} (${missingList.size} à porter).")
+        onLog("[TOTAL-SCAN-FOD] Comparaison System+Vendor terminée : ${items.count { it.readyInUnpacked }}/${items.size} briques FOD alignées dans ${gsiSystem.name}.")
         FodTotalComparativeScanReport(
             unpackedOsName = gsiSystem.name,
-            hostSystemDeviceSummary = "${Build.BRAND} ${Build.DEVICE} (${Build.MODEL} • Android ${Build.VERSION.RELEASE})",
+            hostSystemDeviceSummary = "${dna.hostBrand} ${dna.hostDevice} (${dna.hostModel} • ${dna.hostSystemRomType})",
+            baseReferenceSummary = "Logique Dynamique Téléphone : /system (${dna.hostSystemProps.size} props, key ${dna.hostSystemKeycodeDetected}) + /vendor (${dna.resolvedHbmSysfsNode}, X=${dna.resolvedCenterX}, Y=${dna.resolvedCenterY})",
             comparativeItems = items,
-            missingElementsToPort = if (missingList.isEmpty()) listOf("Aucun élément manquant — Le GSI unpacké possède déjà tous les composants FOD !") else missingList,
+            missingElementsToPort = if (missingList.isEmpty()) listOf("Aucun élément manquant — Le GSI unpacké est 100% aligné avec le /system et le /vendor de votre téléphone !") else missingList,
             fodPortingStrategySteps = strategy,
-            coherenceWithScannerAndCompare = "Synchronisé avec SCANNER (Rapport #15 Biométrie UDFPS) & COMPARE (Chaîne de fixation isolée sans risque de bootloop)"
+            coherenceWithScannerAndCompare = "Synchronisé avec HostSystemAndVendorFodProbe (/system + /vendor) + SCANNER (16 rapports) + COMPARE",
+            hostSystemLogicVerified = dna.systemLogicSummary,
+            hostVendorLogicVerified = dna.vendorLogicSummary,
+            systemToVendorBridgeSummary = dna.systemToVendorBridgeExplanation
         )
     }
 
@@ -534,10 +569,18 @@ class AutoPorterEngine(private val workspaceDir: File) {
         onLog("[FOD-FIX 3/4] Intégrité secilc Stage 1 et libvintf garantie : /${pfx}etc/selinux/ et /${pfx}etc/vintf/manifest.xml préservés à 100%.")
 
         // 4. Inject Init RC HBM 0x20000 state machine, Goodix keylayout 338, and build.prop FOD properties into the unpacked GSI
+        val dynamicDna = HostSystemAndVendorFodProbe.probePhoneSystemAndVendorFodLogic(
+            extractRootDir = File(workspaceDir, "EXTRACT").apply { mkdirs() },
+            stockVendorRefDir = stockVendor,
+            forceRefresh = false,
+            onLog = onLog
+        )
         val updatedFod = injectUdfpsFodHalAndHbmShim(gsiSystem, brand, codename, platform, initialFodDiag, onLog)
+        injectedFiles.add(File(topology.initRcDir, dynamicDna.dynamicInitRcScriptName))
         injectedFiles.add(File(topology.initRcDir, "init.tucana.fod.rc"))
+        injectedFiles.add(File(topology.keylayoutDir, dynamicDna.dynamicKeylayoutFileName))
         injectedFiles.add(File(topology.keylayoutDir, "uinput-goodix.kl"))
-        onLog("[FOD-FIX 4/4] /${pfx}etc/init/init.tucana.fod.rc, /${pfx}usr/keylayout/uinput-goodix.kl et propriétés FOD dans /${pfx}build.prop appliqués dans UNPACK/${gsiSystem.name}.")
+        onLog("[FOD-FIX 4/4] Logique Dynamique System+Vendor appliquée : /${pfx}etc/init/${dynamicDna.dynamicInitRcScriptName}, /${pfx}usr/keylayout/${dynamicDna.dynamicKeylayoutFileName} (key ${dynamicDna.hostSystemKeycodeDetected}) et ${dynamicDna.dynamicBuildPropsToInject.size} propriétés FOD dans /${pfx}build.prop.")
 
         AospTopologyResolver.registerInjectedFilesInAllConfigs(
             unpackedRoot = gsiSystem,
@@ -551,14 +594,14 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val updatedFodStruct = scanFodStructAndBuildActionPlan(gsiSystem, stockVendor) { }.copy(
             stockGradeFixApplied = true,
             stockGradeFixSummary = listOf(
-                "Mode Appliqué : FOD Fix Standard sur GSI Unpacké SANS Repack Automatique & SANS Modifier les APKs Internes",
-                "Dossier Cible Modifié : ${gsiSystem.absolutePath} (Prêt pour analyse SCANNER / COMPARE et Repack R.E.C.O.R.E)",
-                "Zéro Risque de Bootloop : 0 APK interne modifié (signatures AOSP v2/v3 et .odex/.vdex 100% d'origine), 0 conflit secilc SELinux, 0 conflit libvintf.",
-                "Fichiers FOD Greffés dans UNPACK : /${pfx}etc/init/init.tucana.fod.rc (HBM 0x20000), /${pfx}usr/keylayout/uinput-goodix.kl (key 338), /${pfx}etc/sysconfig/xiaomi_tucana_fod_config.xml et propriétés UDFPS dans /${pfx}build.prop."
+                "Mode Appliqué : FOD Fix Dynamique (Basé sur la logique réelle /system + /vendor de votre téléphone ${dynamicDna.hostBrand} ${dynamicDna.hostDevice})",
+                "Logique Système Hôte Analysée : ${dynamicDna.hostSystemRomType} (${dynamicDna.hostSystemProps.size} props /system, Keylayout ${dynamicDna.dynamicKeylayoutFileName} key ${dynamicDna.hostSystemKeycodeDetected})",
+                "Logique Vendor & Noyau Analysée : ${dynamicDna.resolvedSensorVendor} @ (${dynamicDna.resolvedCenterX},${dynamicDna.resolvedCenterY}, R=${dynamicDna.resolvedRadiusPx}) | HBM=${dynamicDna.resolvedHbmSysfsNode} (${dynamicDna.resolvedHbmOnValue}) | Dev=${dynamicDna.resolvedFpDevNode}",
+                "Fichiers Dynamiques Greffés dans UNPACK : /${pfx}etc/init/${dynamicDna.dynamicInitRcScriptName}, /${pfx}usr/keylayout/${dynamicDna.dynamicKeylayoutFileName}, /${pfx}etc/sysconfig/${fodSysconfigXml.name} et ${dynamicDna.dynamicBuildPropsToInject.size} propriétés dans /${pfx}build.prop."
             )
         )
 
-        onLog("[FOD-FIX-UNPACK-ONLY] Terminé avec succès ! Le GSI unpacké (${gsiSystem.name}) est patché sans repack. Vous pouvez maintenant vérifier avec COMPARE/SCANNER ou repacker avec R.E.C.O.R.E.")
+        onLog("[FOD-FIX-UNPACK-ONLY] Terminé avec succès ! Le GSI unpacké (${gsiSystem.name}) est aligné sur la logique /system et /vendor de votre téléphone.")
 
         VirtualDeviceTreePortResult(
             stockDeviceBrand = brand,
@@ -567,7 +610,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
             stockBoardPlatform = platform,
             gsiTargetName = gsiName,
             portOutputDirectoryPath = gsiSystem.absolutePath,
-            portedSystemImgPath = "Non repacké (Patch appliqué directement dans UNPACK/${gsiSystem.name})",
+            portedSystemImgPath = "Non repacké (Patch System+Vendor appliqué dans UNPACK/${gsiSystem.name})",
             proprietaryBlobs = transplantedBlobs,
             rroOverlayApkPath = hwOverlay.absolutePath,
             vintfManifestMergedPath = vintfFile.absolutePath,
@@ -577,7 +620,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
             gsiMechanismReport = updatedMech,
             fodStructReport = updatedFodStruct,
             totalScanReport = totalScan,
-            lastAppliedFodFixMode = "FOD_FIX_UNPACK_ONLY_ZERO_APK"
+            hostSystemAndVendorDna = dynamicDna,
+            lastAppliedFodFixMode = "FOD Fix 2 (Dynamique /system + /vendor • Zéro Modif APK)"
         )
     }
 
@@ -622,6 +666,8 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val mkPreview = generateLineageDeviceTreeMakefile(brand, codename, model, platform, blobs, fodDiag)
         val mechReport = inspectGsiMechanismAndVendorCommunication(gsiSystem, stockVendor) { }
         val fodStruct = scanFodStructAndBuildActionPlan(gsiSystem, stockVendor) { }
+        val totalScan = runFodTotalComparativeScan(gsiSystem) { }
+        val dynamicDna = HostSystemAndVendorFodProbe.getLastCachedDna()
 
         onLog(
             "[PORT-ANALYZER] Appareil : $brand $model ($codename / $platform) | Capteur : ${fodDiag.sensorVendor} @ (${fodDiag.fodCenterX}, ${fodDiag.fodCenterY})"
@@ -642,7 +688,9 @@ class AutoPorterEngine(private val workspaceDir: File) {
             fodDiagnostics = fodDiag,
             lineageDeviceMkContent = mkPreview,
             gsiMechanismReport = mechReport,
-            fodStructReport = fodStruct
+            fodStructReport = fodStruct,
+            totalScanReport = totalScan,
+            hostSystemAndVendorDna = dynamicDna
         )
     }
 
@@ -1473,73 +1521,66 @@ class AutoPorterEngine(private val workspaceDir: File) {
         }
     }
 
-    private fun inspectUdfpsFodHardware(
+    private suspend fun inspectUdfpsFodHardware(
         stockVendor: File,
         gsiSystem: File,
         vendorProps: Map<String, String>
     ): UdfpsFodDiagnostics {
-        val hasFodProp = vendorProps["ro.hardware.fp.fod"] == "true" ||
-                vendorProps["persist.vendor.sys.fp.fod.location.X_Y"] != null
-        val permXml = File(stockVendor, "etc/permissions/android.hardware.fingerprint.xml")
-        val hasXiaomiExt = permXml.exists() && permXml.readText().contains("fingerprintextension")
+        val extractRoot = File(workspaceDir, "EXTRACT").apply { mkdirs() }
+        val dna = HostSystemAndVendorFodProbe.probePhoneSystemAndVendorFodLogic(
+            extractRootDir = extractRoot,
+            stockVendorRefDir = stockVendor,
+            forceRefresh = false,
+            onLog = {}
+        )
 
-        val xyProp = vendorProps["persist.vendor.sys.fp.fod.location.X_Y"]
-        val whProp = vendorProps["persist.vendor.sys.fp.fod.size.width_height"]
-
-        val posX = xyProp?.substringBefore(",")?.toIntOrNull()
-            ?: vendorProps["ro.hardware.fp.fod.location.x"]?.toIntOrNull()
-            ?: 445
-        val posY = xyProp?.substringAfter(",")?.toIntOrNull()
-            ?: vendorProps["ro.hardware.fp.fod.location.y"]?.toIntOrNull()
-            ?: 1910
-        val widthPx = whProp?.substringBefore(",")?.toIntOrNull()
-            ?: vendorProps["ro.hardware.fp.fod.size"]?.toIntOrNull()
-            ?: 190
-        val heightPx = whProp?.substringAfter(",")?.toIntOrNull() ?: widthPx
-
-        val hbmNode = vendorProps["persist.vendor.sys.fp.fod.hbm.node"]
-            ?: "/sys/class/drm/card0-DSI-1/disp_param"
-        val dimAlphaNode = "/sys/class/drm/card0-DSI-1/fod_ui_ready"
+        val posX = dna.resolvedCenterX
+        val posY = dna.resolvedCenterY
+        val widthPx = dna.resolvedWidthPx
+        val heightPx = dna.resolvedHeightPx
+        val hbmNode = dna.resolvedHbmSysfsNode
+        val dimAlphaNode = dna.resolvedDimLayerSysfsNode
 
         val gsiDetectedFeatures = mutableListOf<String>()
         val gsiBuildProp = findBuildPropInTree(gsiSystem)
         if (gsiBuildProp.exists()) {
             val text = gsiBuildProp.readText()
             if (text.contains("phh.fod") || text.contains("udfps") || text.contains("ro.hardware.fp.fod")) {
-                gsiDetectedFeatures.add("PHH-Treble & Xiaomi FOD Props")
+                gsiDetectedFeatures.add("Propriétés FOD System+Vendor (${dna.dynamicBuildPropsToInject.size} clés)")
             }
         }
         val sysUiExists = gsiSystem.walkTopDown().any { it.name.contains("SystemUI", true) && it.extension == "apk" }
         if (sysUiExists) {
-            gsiDetectedFeatures.add("SystemUI UdfpsController (BiometricPrompt)")
+            gsiDetectedFeatures.add("Pont ${dna.hostSystemRomType} -> GSI UdfpsController")
         }
-        gsiDetectedFeatures.add("AIDL IBiometricsFingerprint2.3->AIDL Bridge")
-        gsiDetectedFeatures.add("Xiaomi DisplayFeature HBM 0x20000")
+        gsiDetectedFeatures.add("Keylayout Système : ${dna.dynamicKeylayoutFileName} (key ${dna.hostSystemKeycodeDetected})")
+        gsiDetectedFeatures.add("Noeud HBM Vendor : $hbmNode (${dna.resolvedHbmOnValue})")
 
         val topology = AospTopologyResolver.inspectAndResolve(
             unpackedRoot = gsiSystem,
             autoHealSarConflicts = false
         )
-        val shimFile = File(topology.initRcDir, "init.tucana.fod.rc")
+        val shimFile = File(topology.initRcDir, dna.dynamicInitRcScriptName)
+        val legacyShimFile = File(topology.initRcDir, "init.tucana.fod.rc")
         val overlayFile = File(gsiSystem, "ROM_FORGE_META/fod_overlays/TrebleHardwareOverlay.apk")
-        val sysconfigFile = File(topology.etcDir, "sysconfig/xiaomi_tucana_fod_config.xml")
+        val sysconfigFile = File(topology.etcDir, "sysconfig/xiaomi_${dna.hostDevice}_fod_config.xml")
 
         return UdfpsFodDiagnostics(
-            detected = hasFodProp || hasXiaomiExt || true,
+            detected = true,
             hostLiveHardwareProbed = true,
-            sensorVendor = "Goodix GF9518 Optical FOD (Xiaomi Tucana SM6150)",
-            halInterface = "vendor.xiaomi.hardware.fingerprintextension@1.0::IXiaomiFingerprint",
-            aidlBiometricsService = "android.hardware.biometrics.fingerprint-service.xiaomi_tucana",
+            sensorVendor = dna.resolvedSensorVendor,
+            halInterface = dna.resolvedHalInterface,
+            aidlBiometricsService = dna.resolvedAidlOrHidlService,
             fodCenterX = posX,
             fodCenterY = posY,
-            fodRadiusPx = widthPx / 2,
+            fodRadiusPx = dna.resolvedRadiusPx,
             fodWidthPx = widthPx,
             fodHeightPx = heightPx,
             hbmSysfsNode = hbmNode,
             dimLayerAlphaNode = dimAlphaNode,
-            shimScriptPath = "${topology.systemPrefixRel}etc/init/init.tucana.fod.rc",
+            shimScriptPath = "${topology.systemPrefixRel}etc/init/${dna.dynamicInitRcScriptName}",
             gsiFodPropsDetected = gsiDetectedFeatures,
-            systemUiOverlayInjected = shimFile.exists() && (overlayFile.exists() || sysconfigFile.exists())
+            systemUiOverlayInjected = (shimFile.exists() || legacyShimFile.exists()) && (overlayFile.exists() || sysconfigFile.exists())
         )
     }
 
@@ -1915,7 +1956,7 @@ class AutoPorterEngine(private val workspaceDir: File) {
         return cilRules.size
     }
 
-    private fun injectUdfpsFodHalAndHbmShim(
+    private suspend fun injectUdfpsFodHalAndHbmShim(
         gsiSystem: File,
         brand: String,
         codename: String,
@@ -1925,7 +1966,14 @@ class AutoPorterEngine(private val workspaceDir: File) {
     ): UdfpsFodDiagnostics {
         val topology = AospTopologyResolver.inspectAndResolve(gsiSystem, autoHealSarConflicts = true, onLog = onLog)
         val initDir = topology.initRcDir.apply { mkdirs() }
-        val rcFile = File(initDir, "init.tucana.fod.rc")
+        val extractRoot = File(workspaceDir, "EXTRACT").apply { mkdirs() }
+        val stockVendor = resolveStockVendorRefDir()
+        val dna = HostSystemAndVendorFodProbe.probePhoneSystemAndVendorFodLogic(
+            extractRootDir = extractRoot,
+            stockVendorRefDir = stockVendor,
+            forceRefresh = false,
+            onLog = onLog
+        )
 
         // Remove any synthetic 256-byte stub binary from bin/hw so init never tries to execve a stub binary!
         val legacyStubBin = File(topology.systemBaseDir, "bin/hw/android.hardware.biometrics.fingerprint-service.xiaomi_tucana")
@@ -1933,65 +1981,55 @@ class AutoPorterEngine(private val workspaceDir: File) {
             legacyStubBin.delete()
         }
 
-        rcFile.writeText(
-            """
-            # R.E.C.O.R.E Source-Built UDFPS / FOD & HBM Integration RC ($brand $codename / $platform)
-            on init
-                chown system system ${fod.hbmSysfsNode}
-                chmod 0664 ${fod.hbmSysfsNode}
-                chown system system ${fod.dimLayerAlphaNode}
-                chmod 0664 ${fod.dimLayerAlphaNode}
+        // Write the dynamically synthesized RC script tailored to the phone's /system + /vendor logic
+        val dynamicRcFile = File(initDir, dna.dynamicInitRcScriptName)
+        dynamicRcFile.writeText(dna.dynamicInitRcScriptContent)
+        // Also keep init.tucana.fod.rc synchronized if device != tucana so any existing references stay valid
+        val compatRcFile = File(initDir, "init.tucana.fod.rc")
+        if (compatRcFile.absolutePath != dynamicRcFile.absolutePath) {
+            compatRcFile.writeText(dna.dynamicInitRcScriptContent)
+        }
 
-            on boot
-                chown system system /dev/goodix_fp
-                chmod 0660 /dev/goodix_fp
-                chown system system /sys/devices/virtual/touch/tp_dev/fod_status
-                chmod 0664 /sys/devices/virtual/touch/tp_dev/fod_status
-                setprop persist.sys.phh.fod.xiaomi true
-                setprop ro.hardware.fp.fod true
-                setprop persist.vendor.sys.fp.fod.location.X_Y "${fod.fodCenterX},${fod.fodCenterY}"
-                setprop persist.vendor.sys.fp.fod.size.width_height "${fod.fodWidthPx},${fod.fodHeightPx}"
-
-            on property:sys.udfps.hbm.state=1
-                write ${fod.hbmSysfsNode} "0x20000"
-                write ${fod.dimLayerAlphaNode} "1"
-
-            on property:sys.udfps.hbm.state=0
-                write ${fod.hbmSysfsNode} "0x0"
-                write ${fod.dimLayerAlphaNode} "0"
-            """.trimIndent() + "\n"
-        )
-
+        // Dynamically merge all FOD/UDFPS properties discovered on the phone's /system and /vendor into the GSI's build.prop
         val propFile = topology.mainBuildPropFile
         if (propFile.exists()) {
             var propText = propFile.readText()
-            if (!propText.contains("ro.hardware.fp.fod=true")) {
+            val existingKeys = parseBuildProp(propFile).keys
+            val missingEntries = dna.dynamicBuildPropsToInject.filterKeys { it !in existingKeys }
+            if (missingEntries.isNotEmpty()) {
                 if (!propText.endsWith("\n")) propText += "\n"
-                propText += """
-                    # --- R.E.C.O.R.E Source-Built $brand $codename ($platform) FOD & Hardware Props ---
-                    ro.hardware.fp.fod=true
-                    persist.sys.phh.fod.xiaomi=true
-                    persist.vendor.sys.fp.fod.location.X_Y=${fod.fodCenterX},${fod.fodCenterY}
-                    persist.vendor.sys.fp.fod.size.width_height=${fod.fodWidthPx},${fod.fodHeightPx}
-                    persist.vendor.sys.fp.fod.hbm.node=${fod.hbmSysfsNode}
-                    ro.SurfaceFlinger.max_frame_buffer_acquired_buffers=3
-                    ro.Flinger.enable_frame_rate_override=false
-                """.trimIndent() + "\n"
+                propText += "# --- GASTROengine Dynamic Host /system + /vendor FOD Logic ($brand $codename / $platform) ---\n"
+                missingEntries.forEach { (k, v) ->
+                    propText += "$k=$v\n"
+                }
                 propFile.writeText(propText)
             }
         }
 
+        // Write the dynamically probed Keylayout from the phone's /system/usr/keylayout/
         val klDir = topology.keylayoutDir.apply { mkdirs() }
-        File(klDir, "uinput-goodix.kl").writeText(
-            """
-            # Xiaomi Tucana Goodix FOD Virtual Keylayout
-            key 338   SYSTEM_NAVIGATION_UP
-            """.trimIndent() + "\n"
-        )
+        val dynamicKlFile = File(klDir, dna.dynamicKeylayoutFileName)
+        dynamicKlFile.writeText(dna.dynamicKeylayoutContent)
+        val compatKlFile = File(klDir, "uinput-goodix.kl")
+        if (compatKlFile.absolutePath != dynamicKlFile.absolutePath) {
+            compatKlFile.writeText(dna.dynamicKeylayoutContent)
+        }
 
-        onLog("[R.E.C.O.R.E-FOD] ${rcFile.name}, uinput-goodix.kl et propriétés FOD/HBM intégrés chirurgicalement dans /${topology.systemPrefixRel} sans toucher à plat_file_contexts ni aux binaires système.")
+        onLog(
+            "[DYNAMIC-FOD-INJECT] Pont System+Vendor injecté dans /${topology.systemPrefixRel} : " +
+                "RC=${dynamicRcFile.name} (HBM ${dna.resolvedHbmOnValue} sur ${dna.resolvedHbmSysfsNode}, Touch=${dna.resolvedTouchFodNode}), " +
+                "Keylayout=${dynamicKlFile.name} (key ${dna.hostSystemKeycodeDetected} -> ${dna.hostSystemKeycodeName}), " +
+                "et ${dna.dynamicBuildPropsToInject.size} propriétés System+Vendor."
+        )
         return fod.copy(
-            shimScriptPath = "${topology.systemPrefixRel}etc/init/init.tucana.fod.rc",
+            fodCenterX = dna.resolvedCenterX,
+            fodCenterY = dna.resolvedCenterY,
+            fodRadiusPx = dna.resolvedRadiusPx,
+            fodWidthPx = dna.resolvedWidthPx,
+            fodHeightPx = dna.resolvedHeightPx,
+            hbmSysfsNode = dna.resolvedHbmSysfsNode,
+            dimLayerAlphaNode = dna.resolvedDimLayerSysfsNode,
+            shimScriptPath = "${topology.systemPrefixRel}etc/init/${dynamicRcFile.name}",
             systemUiOverlayInjected = true
         )
     }

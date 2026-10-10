@@ -1,4 +1,4 @@
-name: Android CI - ROM Forge APK Build
+name: Android CI - GASTRO APK Build (with Embedded AI Secret)
 
 on:
   push:
@@ -26,6 +26,18 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      - name: Inject GEMINI_API_KEY into .env for Secrets Gradle Plugin (Zero Runtime Key Entry)
+        env:
+          GEMINI_API_KEY_SECRET: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY_SECRET" ]; then
+            echo "GEMINI_API_KEY=$GEMINI_API_KEY_SECRET" > .env
+            echo "[GASTRO-CI] GEMINI_API_KEY injected from GitHub Repository Secrets into BuildConfig.GEMINI_API_KEY."
+          else
+            cp .env.example .env
+            echo "[GASTRO-CI] No GEMINI_API_KEY secret found in GitHub; using .env.example (GASTROengine Anti-Quota Local AI Engine will remain active)."
+          fi
+
       - name: Ensure debug.keystore exists for signing
         run: |
           if [ ! -f debug.keystore ]; then
@@ -39,7 +51,7 @@ jobs:
             fi
           fi
 
-      - name: Assemble Debug APK
+      - name: Assemble GASTRO Debug APK
         run: |
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
@@ -56,8 +68,8 @@ jobs:
             gradle :app:testDebugUnitTest --stacktrace
           fi
 
-      - name: Upload ROM Forge Debug APK Artifact
+      - name: Upload GASTRO Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ROM-Forge-Debug-APK
+          name: GASTRO-Debug-APK
           path: app/build/outputs/apk/debug/*.apk

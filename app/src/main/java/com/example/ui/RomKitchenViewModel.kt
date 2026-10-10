@@ -9,6 +9,13 @@ import com.example.core.assets.AssetBinaryManager
 import com.example.core.assets.ExtractedBinary
 import com.example.core.docs.GeneratedPdfDocResult
 import com.example.core.docs.RomForgePdfManualGenerator
+import com.example.core.gastro.GastroAiScanReport
+import com.example.core.gastro.GastroCreationMakeImgResult
+import com.example.core.gastro.GastroCreationMakeRomZipResult
+import com.example.core.gastro.GastroDeviceDnaProfile
+import com.example.core.gastro.GastroEngine
+import com.example.core.gastro.GastroPorterPlanReport
+import com.example.core.gastro.GastroSubsystemDescriptor
 import com.example.core.recore.RecoreEngine
 import com.example.core.recore.RecoreFullBrainReport
 import com.example.core.shell.ExecutionMode
@@ -58,8 +65,10 @@ enum class KitchenTab(val route: String, val label: String) {
     SIGN_PRO("sign_pro", "Sign Pro"),
     GENERATOR("generator", "Generator"),
     COMPILER("compiler", "Compilator"),
-    AUTO_PORTER("auto_porter", "Porting (GSI)"),
-    RECORE("recore", "R.E.C.O.R.E"),
+    EXTRACTOR("extractor", "EXTRACTOR"),
+    AUTO_PORTER("auto_porter", "PORTER"),
+    CREATION("creation", "CREATION"),
+    RECORE("recore", "R.E.C.O.R.E (Background)"),
     CONSOLE("console", "Console"),
     HELP("help", "Paramètres")
 }
@@ -137,8 +146,19 @@ data class KitchenUiState(
     val lastMountedImgReport: ImageInspectionReport? = null,
     // Auto-Porter state
     val portAnalysisResult: VirtualDeviceTreePortResult? = null,
-    // R.E.C.O.R.E Brain state
+    // R.E.C.O.R.E Brain state (kept in background to power GASTROengine)
     val recoreBrainReport: RecoreFullBrainReport? = null,
+    // GASTROengine (Rust 10-Subsystem Core + EXTRACTOR + PORTERPLAN + AISCAN + CREATION)
+    val gastroSubsystems: List<GastroSubsystemDescriptor> = emptyList(),
+    val isExtractReady: Boolean = false,
+    val extractedFilesCount: Int = 0,
+    val gastroDnaProfile: GastroDeviceDnaProfile? = null,
+    val gastroPorterPlanReport: GastroPorterPlanReport? = null,
+    val gastroAiScanReport: GastroAiScanReport? = null,
+    val lastMakeImgResult: GastroCreationMakeImgResult? = null,
+    val lastMakeRomZipResult: GastroCreationMakeRomZipResult? = null,
+    val isCompileTimeAiKeyEmbedded: Boolean = false,
+    val embeddedAiKeyStatusText: String = "",
     // Cross-Verifier summary
     val verificationSummary: CrossVerificationSummary? = null,
     // Console saved path
@@ -183,6 +203,20 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
         signProEngine = signProEngine,
         imgCompilerEngine = imgCompilerEngine,
         artGeneratorEngine = artGeneratorEngine
+    )
+    private val gastroEngine = GastroEngine(
+        workspaceDir = assetBinaryManager.getWorkspaceDir(),
+        extractRootDir = storageManager.getExtractRootDir(),
+        creationOutputDir = storageManager.getCreationOutputDir(),
+        packedOutputDir = storageManager.getPackedOutputImagesDir(),
+        shellEngine = shellEngine,
+        recoreEngine = recoreEngine,
+        imgCompilerEngine = imgCompilerEngine,
+        autoPorterEngine = autoPorterEngine,
+        keyMakerEngine = keyMakerEngine,
+        signProEngine = signProEngine,
+        artGeneratorEngine = artGeneratorEngine,
+        crossVerifierEngine = crossVerifierEngine
     )
 
     private val _uiState = MutableStateFlow(KitchenUiState())
@@ -267,6 +301,7 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                 autoHealAndGenerateShims = false,
                 onLog = { appendLog(it) }
             )
+            val porterPlanInit = gastroEngine.buildPorterPlanAndAlignStructure(activeDir) { appendLog(it) }
 
             _uiState.update {
                 it.copy(
@@ -286,6 +321,12 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     preFlightItems = preFlight,
                     portAnalysisResult = portInit,
                     recoreBrainReport = recoreInit,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
+                    gastroPorterPlanReport = porterPlanInit,
+                    isCompileTimeAiKeyEmbedded = gastroEngine.isCompileTimeGeminiKeyEmbedded(),
+                    embeddedAiKeyStatusText = gastroEngine.getEmbeddedAiKeyStatusSummary(),
                     verificationSummary = verifierSummary
                 )
             }
@@ -1680,8 +1721,8 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
             summary.alerts.forEach { repository.addAlert(it) }
 
             recordActionCompleted(
-                moduleLabel = "Porting (GSI)",
-                actionTitle = "Portage R.E.C.O.R.E Source-Built vers ROM_FORGE/PORT",
+                moduleLabel = "PORTER",
+                actionTitle = "PORT (Portage Complet via EXTRACT & GASTROengine)",
                 targetName = gsiDir.name,
                 summaryDetail = "${result.proprietaryBlobs.size} Blobs + Patch APK In-Place + Shims ELF64 + Image ${portedImg.name} (Z3=${recoreReport.smtStatus})"
             )
@@ -1694,6 +1735,317 @@ class RomKitchenViewModel(application: Application) : AndroidViewModel(applicati
                     portAnalysisResult = result.copy(portedSystemImgPath = pubPortedImg),
                     scannedApks = updatedApks,
                     recoreBrainReport = recoreReport,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // MODULE EXTRACTOR (ExtractMe -> ROM_FORGE/EXTRACT via GASTROengine)
+    // =========================================================================
+    fun executeExtractorExtractMe(combineWithTucanaReference: Boolean = true) {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "EXTRACTOR • ExtractMe : Extraction sécurisée de l'ADN du téléphone vers ROM_FORGE/EXTRACT/...",
+                    activeTaskProgress = 0.15f
+                )
+            }
+
+            val dnaProfile = gastroEngine.runExtractorExtractMeToExtractFolder(
+                combineWithTucanaReference = combineWithTucanaReference,
+                onProgress = { p, title ->
+                    _uiState.update { it.copy(activeTaskProgress = p, activeTaskTitle = title) }
+                },
+                onLog = { appendLog(it) }
+            )
+
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = storageManager.getExtractRootDir(),
+                subFolderName = "EXTRACT",
+                onLog = { appendLog(it) }
+            )
+
+            val extractionSummary = autoPorterEngine.executeExtractMeRootComponents(
+                combineWithUseBase = combineWithTucanaReference,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+            val porterPlan = gastroEngine.buildPorterPlanAndAlignStructure(gsiDir) { appendLog(it) }
+
+            recordActionCompleted(
+                moduleLabel = "EXTRACTOR",
+                actionTitle = "ExtractMe (Extraction Complète vers ROM_FORGE/EXTRACT/)",
+                targetName = "${dnaProfile.deviceBrand} ${dnaProfile.deviceCodename}",
+                summaryDetail = "${dnaProfile.extractedFilesCount} fichiers isolés dans EXTRACT/ | 0 écriture sur le système du téléphone"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    gastroDnaProfile = dnaProfile,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = true,
+                    extractedFilesCount = dnaProfile.extractedFilesCount,
+                    gastroPorterPlanReport = porterPlan,
+                    portAnalysisResult = currentPort.copy(sourceExtractionSummary = extractionSummary)
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // PORTER : PORTERPLAN, SCAN, AISCAN & FOD FIX 3 (GASTROengine + IA)
+    // =========================================================================
+    fun runGastroPorterPlanAnalysis() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "PORTERPLAN : Analyse Comparative GSI (${gsiDir.name}) <-> Téléphone (EXTRACT/)...",
+                    activeTaskProgress = 0.45f
+                )
+            }
+            val planReport = gastroEngine.buildPorterPlanAndAlignStructure(gsiDir) { appendLog(it) }
+            val mechReport = autoPorterEngine.inspectGsiMechanismAndVendorCommunication(gsiDir) { appendLog(it) }
+            val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+
+            recordActionCompleted(
+                moduleLabel = "PORTER • PORTERPLAN",
+                actionTitle = "Architecture & Plan de Portage (GSI <-> Téléphone)",
+                targetName = gsiDir.name,
+                summaryDetail = "${planReport.architectureComparisons.size} sous-systèmes comparés | StructureAligner & VintfReconciler actifs"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    gastroPorterPlanReport = planReport,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
+                    portAnalysisResult = currentPort.copy(gsiMechanismReport = mechReport)
+                )
+            }
+        }
+    }
+
+    fun runGastroAiFodScan() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "AISCAN : Analyse FOD par AiPortingAgent (Gemini / AI Studio Gratuit + Anti-Quota + GASTROengine)...",
+                    activeTaskProgress = 0.40f
+                )
+            }
+            val totalScan = autoPorterEngine.runFodTotalComparativeScan(gsiDir) { appendLog(it) }
+            val fodStruct = autoPorterEngine.scanFodStructAndBuildActionPlan(gsiDir) { appendLog(it) }
+            val aiReport = gastroEngine.runAiPortingAgentFodScan(
+                unpackedGsiDir = gsiDir,
+                fodStructReport = fodStruct,
+                totalScanReport = totalScan,
+                onLog = { appendLog(it) }
+            )
+            val currentPort = _uiState.value.portAnalysisResult ?: autoPorterEngine.analyzeStockAndGsiTrees(gsiDir) { appendLog(it) }
+
+            recordActionCompleted(
+                moduleLabel = "PORTER • AISCAN",
+                actionTitle = "AISCAN (AiPortingAgent + Anti-Quota + GASTROengine)",
+                targetName = gsiDir.name,
+                summaryDetail = "Modèle: ${aiReport.engineModelUsed} | ${aiReport.aiGeneratedPortingSteps.size} étapes générées"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    gastroAiScanReport = aiReport,
+                    portAnalysisResult = currentPort.copy(
+                        fodStructReport = fodStruct,
+                        totalScanReport = totalScan
+                    )
+                )
+            }
+        }
+    }
+
+    fun applyFodFix3AiAndGastroEngine() {
+        viewModelScope.launch {
+            val gsiDir = File(_uiState.value.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "FOD Fix 3 : Correction FOD Assistée par l'IA (AiPortingAgent) + GASTROengine + R.E.C.O.R.E...",
+                    activeTaskProgress = 0.35f
+                )
+            }
+            val activeKeys = ensureKeysAvailable(_uiState.value)
+            val (portResult, aiReport, recoreReport) = gastroEngine.applyFodFix3WithAiAndGastroEngine(
+                unpackedGsiDir = gsiDir,
+                activeKeys = activeKeys,
+                onLog = { appendLog(it) }
+            )
+
+            storageManager.mirrorDirectoryToPublicDownloadRomForge(
+                sourceDir = gsiDir,
+                subFolderName = "UNPACK/${gsiDir.name}",
+                onLog = { appendLog(it) }
+            )
+
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "PORTER • FOD Fix 3",
+                actionTitle = "FOD Fix 3 (IA AiPortingAgent + GASTROengine + R.E.C.O.R.E)",
+                targetName = gsiDir.name,
+                summaryDetail = "Alignement Symlinks + Overlays RRO + Init RC + Keylayout + Z3=${recoreReport.smtStatus} (${recoreReport.bootConfidenceScore}/100)"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    portAnalysisResult = portResult,
+                    gastroAiScanReport = aiReport,
+                    recoreBrainReport = recoreReport,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // MODULE CREATION (Make IMG & Make ROM Flashable ZIP via GASTROengine)
+    // =========================================================================
+    fun executeCreationMakeImg() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val gsiDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "CREATION • Make IMG : Construction d'un OS .img à partir du GSI (${gsiDir.name}) & EXTRACT...",
+                    activeTaskProgress = 0.15f
+                )
+            }
+            val activeKeys = ensureKeysAvailable(state)
+            val (makeImgResult, recoreReport) = gastroEngine.creationMakeBootableImg(
+                unpackedGsiDir = gsiDir,
+                filesystemFormat = state.selectedFsFormat,
+                activeKeys = activeKeys,
+                onProgress = { p, title ->
+                    _uiState.update { it.copy(activeTaskProgress = p, activeTaskTitle = title) }
+                },
+                onLog = { appendLog(it) }
+            )
+
+            val pubImgPath = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(makeImgResult.outputImgPath),
+                subFolder = "CREATION",
+                onLog = { appendLog(it) }
+            )
+            storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(makeImgResult.outputImgPath),
+                subFolder = "PACKED",
+                onLog = { appendLog(it) }
+            )
+
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "CREATION • Make IMG",
+                actionTitle = "Make IMG (Reconstruction OS Source-Built via GASTROengine)",
+                targetName = gsiDir.name,
+                summaryDetail = "${File(pubImgPath).name} (${makeImgResult.sizeBytes / 1024} KB) | Z3=${makeImgResult.recoreSmtStatus} (${makeImgResult.recoreBootConfidence}/100)"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    lastMakeImgResult = makeImgResult.copy(outputImgPath = pubImgPath),
+                    recoreBrainReport = recoreReport,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
+                    verificationSummary = summary
+                )
+            }
+        }
+    }
+
+    fun executeCreationMakeRomZip() {
+        viewModelScope.launch {
+            val state = _uiState.value
+            val gsiDir = File(state.selectedDecompiledImgFullPath)
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    activeTaskTitle = "CREATION • Make ROM : Création d'une Custom ROM complète en .zip flashable (${gsiDir.name})...",
+                    activeTaskProgress = 0.15f
+                )
+            }
+            val activeKeys = ensureKeysAvailable(state)
+            val (makeRomResult, recoreReport) = gastroEngine.creationMakeFlashableRomZip(
+                unpackedGsiDir = gsiDir,
+                filesystemFormat = state.selectedFsFormat,
+                activeKeys = activeKeys,
+                onProgress = { p, title ->
+                    _uiState.update { it.copy(activeTaskProgress = p, activeTaskTitle = title) }
+                },
+                onLog = { appendLog(it) }
+            )
+
+            val pubZipPath = storageManager.exportSingleFileToPublicRomForge(
+                sourceFile = File(makeRomResult.outputFlashableZipPath),
+                subFolder = "CREATION",
+                onLog = { appendLog(it) }
+            )
+
+            val summary = crossVerifierEngine.runFullDiagnostic(activeKeys, gsiDir) { appendLog(it) }
+            repository.clearAlerts()
+            summary.alerts.forEach { repository.addAlert(it) }
+
+            recordActionCompleted(
+                moduleLabel = "CREATION • Make ROM",
+                actionTitle = "Make ROM (Création Custom ROM Complète Flashable .zip)",
+                targetName = gsiDir.name,
+                summaryDetail = "${File(pubZipPath).name} (${makeRomResult.zipSizeBytes / 1024} KB) | ${makeRomResult.includedEntries.size} entrées | Z3=${makeRomResult.recoreSmtStatus}"
+            )
+
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    activeTaskTitle = "",
+                    activeTaskProgress = 1f,
+                    lastMakeRomZipResult = makeRomResult.copy(outputFlashableZipPath = pubZipPath),
+                    recoreBrainReport = recoreReport,
+                    gastroSubsystems = gastroEngine.getTenRustSubsystemsStatus(),
+                    isExtractReady = gastroEngine.isExtractFolderPopulated(),
+                    extractedFilesCount = gastroEngine.countExtractedFiles(),
                     verificationSummary = summary
                 )
             }

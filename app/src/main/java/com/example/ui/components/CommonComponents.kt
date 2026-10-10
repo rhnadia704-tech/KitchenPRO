@@ -134,14 +134,14 @@ fun TopSystemStatusBar(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Menu,
-                        contentDescription = "Menu Latéral ROM Forge",
+                        contentDescription = "Menu Latéral GASTRO",
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "ROM FORGE • AOSP KITCHEN",
+                        text = "GASTRO • INGÉNIERIE ANDROID & ROM",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -149,7 +149,7 @@ fun TopSystemStatusBar(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "$romForgePublicPath/{UNPACK,PACKED,KEY,PORT}",
+                        text = "$romForgePublicPath/{UNPACK,EXTRACT,PORT,CREATION}",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.primary,

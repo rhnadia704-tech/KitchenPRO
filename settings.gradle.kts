@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "ROM Forge"
+rootProject.name = "GASTRO"
 
 include(":app")
