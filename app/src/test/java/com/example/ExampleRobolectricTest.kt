@@ -22,7 +22,7 @@ class ExampleRobolectricTest {
     fun `verify app name and core AOSP reverse compiler modules`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val appName = context.getString(R.string.app_name)
-        assertEquals("ROM Forge", appName)
+        assertEquals("GASTRO", appName)
 
         // 1. Verify AssetBinaryManager extracts all 7 static binaries
         val binaryManager = AssetBinaryManager(context)

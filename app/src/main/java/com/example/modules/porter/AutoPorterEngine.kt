@@ -184,19 +184,26 @@ class AutoPorterEngine(private val workspaceDir: File) {
         val stockVendor = resolveStockVendorRefDir()
         onLog("[EXTRACT-ME] Démarrage de l'extraction des composants System & Vendor de la ROM actuelle (Root + Live Probe)...")
 
+        val suBinaryExists = File("/system/bin/su").exists() ||
+            File("/system/xbin/su").exists()
+
         var rootOk = false
-        try {
-            val proc = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-            val out = proc.inputStream.bufferedReader().readText()
-            proc.waitFor()
-            if (out.contains("uid=0")) {
-                rootOk = true
-                onLog("[EXTRACT-ME] Accès Root (uid=0) confirmé : extraction complète des HALs, Blobs, VINTF, Keylayouts et Overlays de /system et /vendor...")
-            } else {
-                onLog("[EXTRACT-ME] Root non accordé par su : extraction directe des partitions /system et /vendor accessibles + synchronisation intelligente.")
+        if (suBinaryExists) {
+            try {
+                val proc = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+                val out = proc.inputStream.bufferedReader().readText()
+                proc.waitFor()
+                if (out.contains("uid=0")) {
+                    rootOk = true
+                    onLog("[EXTRACT-ME] Accès Root (uid=0) confirmé : extraction complète des HALs, Blobs, VINTF, Keylayouts et Overlays de /system et /vendor...")
+                } else {
+                    onLog("[EXTRACT-ME] Root non accordé par su : extraction directe des partitions /system et /vendor accessibles + synchronisation intelligente.")
+                }
+            } catch (_: Exception) {
+                onLog("[EXTRACT-ME] Binaire su absent sur cet environnement : extraction directe des fichiers lisibles de /system et /vendor.")
             }
-        } catch (_: Exception) {
-            onLog("[EXTRACT-ME] Binaire su absent sur cet environnement : extraction directe des fichiers lisibles de /system et /vendor.")
+        } else {
+            onLog("[EXTRACT-ME] Mode Live System+Vendor : extraction directe des fichiers et propriétés lisibles de /system et /vendor.")
         }
 
         val hostCandidatePaths = listOf(
@@ -223,20 +230,29 @@ class AutoPorterEngine(private val workspaceDir: File) {
             val dstInVendorRef = File(stockVendor, relDst).apply { parentFile?.mkdirs() }
             var copied = false
 
-            val srcFile = File(srcAbs)
-            if (srcFile.exists() && srcFile.canRead() && srcFile.length() > 0L) {
-                runCatching {
-                    srcFile.copyTo(dstInExtractMe, overwrite = true)
-                    srcFile.copyTo(dstInVendorRef, overwrite = true)
-                    copied = true
-                }
-            } else if (rootOk) {
-                runCatching {
-                    val cmd = "cp -f $srcAbs ${dstInExtractMe.absolutePath} && chmod 0644 ${dstInExtractMe.absolutePath}"
-                    ProcessBuilder("su", "-c", cmd).start().waitFor()
-                    if (dstInExtractMe.exists() && dstInExtractMe.length() > 0L) {
-                        dstInExtractMe.copyTo(dstInVendorRef, overwrite = true)
+            if (!rootOk && srcAbs.startsWith("/vendor/")) {
+                if (dstInVendorRef.exists() && dstInVendorRef.length() > 0L) {
+                    runCatching {
+                        dstInVendorRef.copyTo(dstInExtractMe, overwrite = true)
                         copied = true
+                    }
+                }
+            } else {
+                val srcFile = File(srcAbs)
+                if (srcFile.exists() && srcFile.canRead() && srcFile.length() > 0L) {
+                    runCatching {
+                        srcFile.copyTo(dstInExtractMe, overwrite = true)
+                        srcFile.copyTo(dstInVendorRef, overwrite = true)
+                        copied = true
+                    }
+                } else if (rootOk) {
+                    runCatching {
+                        val cmd = "cp -f $srcAbs ${dstInExtractMe.absolutePath} && chmod 0644 ${dstInExtractMe.absolutePath}"
+                        ProcessBuilder("su", "-c", cmd).start().waitFor()
+                        if (dstInExtractMe.exists() && dstInExtractMe.length() > 0L) {
+                            dstInExtractMe.copyTo(dstInVendorRef, overwrite = true)
+                            copied = true
+                        }
                     }
                 }
             }

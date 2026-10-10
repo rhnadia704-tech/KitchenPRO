@@ -82,26 +82,28 @@ object HostSystemAndVendorFodProbe {
 
         onLog("[DYNAMIC-FOD-PROBE] Inspection dynamique de la logique FOD sur /system (/product, /system_ext) ET /vendor (/odm, /sys, /dev) du téléphone...")
 
+        val suBinaryExists = File("/system/bin/su").exists() ||
+            File("/system/xbin/su").exists()
+
         var rootOk = false
-        try {
-            val p = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-            val out = p.inputStream.bufferedReader().readText()
-            p.waitFor()
-            if (out.contains("uid=0")) {
-                rootOk = true
-                onLog("[DYNAMIC-FOD-PROBE] Root (uid=0) actif : lecture directe des partitions /system, /product, /system_ext, /vendor, /odm et /sys.")
+        if (suBinaryExists) {
+            try {
+                val p = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
+                val out = p.inputStream.bufferedReader().readText()
+                p.waitFor()
+                if (out.contains("uid=0")) {
+                    rootOk = true
+                    onLog("[DYNAMIC-FOD-PROBE] Root (uid=0) actif : lecture directe des partitions /system, /product, /system_ext, /vendor, /odm et /sys.")
+                }
+            } catch (_: Exception) {
+                // Non-root fallback uses SystemProperties + readable /system & /product files
             }
-        } catch (_: Exception) {
-            // Non-root fallback uses direct readable files + getprop + sh
         }
 
         fun runHostShell(cmd: String): String {
+            if (!rootOk) return ""
             return try {
-                val proc = if (rootOk) {
-                    ProcessBuilder("su", "-c", cmd)
-                } else {
-                    ProcessBuilder("sh", "-c", cmd)
-                }
+                val proc = ProcessBuilder("su", "-c", cmd)
                 proc.redirectErrorStream(true)
                 val started = proc.start()
                 val text = started.inputStream.bufferedReader().readText()
@@ -112,7 +114,29 @@ object HostSystemAndVendorFodProbe {
             }
         }
 
+        fun readSystemPropertySafe(key: String): String {
+            return try {
+                val clazz = Class.forName("android.os.SystemProperties")
+                val method = clazz.getMethod("get", String::class.java, String::class.java)
+                (method.invoke(null, key, "") as? String)?.trim().orEmpty()
+            } catch (_: Throwable) {
+                ""
+            }
+        }
+
+        fun isRestrictedWithoutRoot(absPath: String): Boolean {
+            return absPath.startsWith("/sys/") ||
+                absPath.startsWith("/dev/") ||
+                absPath.startsWith("/odm/") ||
+                absPath.startsWith("/vendor/") ||
+                absPath.startsWith("/sbin/") ||
+                absPath.startsWith("/debug_ramdisk/")
+        }
+
         fun readHostFileContent(absPath: String, maxBytes: Int = 64 * 1024): String? {
+            if (!rootOk && isRestrictedWithoutRoot(absPath)) {
+                return null
+            }
             val f = File(absPath)
             if (f.exists() && f.canRead() && f.isFile) {
                 return try {
@@ -132,6 +156,9 @@ object HostSystemAndVendorFodProbe {
         }
 
         fun copyHostBinaryIfPresent(absPath: String, dstFile: File): Boolean {
+            if (!rootOk && isRestrictedWithoutRoot(absPath)) {
+                return false
+            }
             val f = File(absPath)
             if (f.exists() && f.canRead() && f.isFile && f.length() > 0L) {
                 return runCatching {
@@ -154,41 +181,82 @@ object HostSystemAndVendorFodProbe {
         val systemProps = linkedMapOf<String, String>()
         val vendorProps = linkedMapOf<String, String>()
 
-        // 1A. Live `getprop` inspection (reads both system and vendor live properties on any Android phone without needing root)
-        val getpropOut = runHostShell("getprop")
-        val propRegex = Regex("^\\[([^]]+)]\\s*:\\s*\\[([^]]*)]$")
-        getpropOut.lineSequence().forEach { line ->
-            val m = propRegex.matchEntire(line.trim())
-            if (m != null) {
-                val k = m.groupValues[1].trim()
-                val v = m.groupValues[2].trim()
-                if (v.isNotEmpty()) {
-                    if (k.contains("fod", true) ||
-                        k.contains("udfps", true) ||
-                        k.contains("fingerprint", true) ||
-                        k.contains("fp.", true) ||
-                        k.contains("biometric", true) ||
-                        k.contains("displayfeature", true) ||
-                        k.contains("hbm", true) ||
-                        k.startsWith("ro.product.") ||
-                        k.startsWith("ro.board.") ||
-                        k.startsWith("ro.hardware") ||
-                        k.startsWith("ro.build.display") ||
-                        k.startsWith("ro.miui.") ||
-                        k.startsWith("ro.lineage.") ||
-                        k.startsWith("persist.sys.phh.")
-                    ) {
-                        if (k.contains("vendor") || k.startsWith("ro.hardware") || k.startsWith("ro.board")) {
-                            vendorProps[k] = v
-                        } else {
-                            systemProps[k] = v
+        // 1A. Live SystemProperties inspection without triggering `getprop` SELinux audit floods
+        val candidatePropertyKeys = listOf(
+            "ro.product.system.brand",
+            "ro.product.system.device",
+            "ro.product.system.model",
+            "ro.product.system.name",
+            "ro.product.vendor.brand",
+            "ro.product.vendor.device",
+            "ro.product.vendor.model",
+            "ro.product.vendor.name",
+            "ro.board.platform",
+            "ro.hardware",
+            "ro.hardware.fp.fod",
+            "ro.hardware.fp.fod.location.x",
+            "ro.hardware.fp.fod.location.y",
+            "ro.hardware.fp.fod.size",
+            "ro.Xiaomi.fod.sensor.location",
+            "persist.vendor.sys.fp.fod.location.X_Y",
+            "persist.vendor.sys.fp.fod.size.width_height",
+            "persist.vendor.sys.fp.fod.hbm.node",
+            "persist.sys.fp.fod.location.X_Y",
+            "persist.sys.fp.fod.size.width_height",
+            "persist.sys.phh.fod.xiaomi",
+            "ro.build.display.id",
+            "ro.miui.ui.version.name",
+            "ro.miui.ui.version.code",
+            "ro.lineage.build.version",
+            "ro.surface_flinger.has_HDR_display"
+        )
+        candidatePropertyKeys.forEach { key ->
+            val value = readSystemPropertySafe(key)
+            if (value.isNotEmpty()) {
+                if (key.contains("vendor") || key.startsWith("ro.hardware") || key.startsWith("ro.board")) {
+                    vendorProps[key] = value
+                } else {
+                    systemProps[key] = value
+                }
+            }
+        }
+
+        if (rootOk) {
+            val getpropOut = runHostShell("getprop")
+            val propRegex = Regex("^\\[([^]]+)]\\s*:\\s*\\[([^]]*)]$")
+            getpropOut.lineSequence().forEach { line ->
+                val m = propRegex.matchEntire(line.trim())
+                if (m != null) {
+                    val k = m.groupValues[1].trim()
+                    val v = m.groupValues[2].trim()
+                    if (v.isNotEmpty()) {
+                        if (k.contains("fod", true) ||
+                            k.contains("udfps", true) ||
+                            k.contains("fingerprint", true) ||
+                            k.contains("fp.", true) ||
+                            k.contains("biometric", true) ||
+                            k.contains("displayfeature", true) ||
+                            k.contains("hbm", true) ||
+                            k.startsWith("ro.product.") ||
+                            k.startsWith("ro.board.") ||
+                            k.startsWith("ro.hardware") ||
+                            k.startsWith("ro.build.display") ||
+                            k.startsWith("ro.miui.") ||
+                            k.startsWith("ro.lineage.") ||
+                            k.startsWith("persist.sys.phh.")
+                        ) {
+                            if (k.contains("vendor") || k.startsWith("ro.hardware") || k.startsWith("ro.board")) {
+                                vendorProps[k] = v
+                            } else {
+                                systemProps[k] = v
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 1B. Parse /system/build.prop, /system_ext/etc/build.prop, /product/etc/build.prop
+        // 1B. Parse /system/build.prop, /system_ext/etc/build.prop, /product/etc/build.prop (plus stockVendorRefDir/build.prop)
         listOf(
             "/system/build.prop",
             "/system/etc/prop.default",
@@ -217,7 +285,11 @@ object HostSystemAndVendorFodProbe {
         var detectedKeycodeName = "SYSTEM_NAVIGATION_UP"
         var detectedKlFileName = "uinput-goodix.kl"
 
-        val klDirectories = listOf("/system/usr/keylayout", "/product/usr/keylayout", "/vendor/usr/keylayout", "/odm/usr/keylayout")
+        val klDirectories = if (rootOk) {
+            listOf("/system/usr/keylayout", "/product/usr/keylayout", "/vendor/usr/keylayout", "/odm/usr/keylayout")
+        } else {
+            listOf("/system/usr/keylayout", "/product/usr/keylayout")
+        }
         for (dirPath in klDirectories) {
             val dir = File(dirPath)
             val files = dir.listFiles()?.filter { it.extension == "kl" }
@@ -292,13 +364,12 @@ object HostSystemAndVendorFodProbe {
 
         // 1E. Inspect Host /system/product/overlay, /product/overlay, /system_ext/overlay & SystemUI for UDFPS logic
         val systemOverlaysFound = mutableListOf<String>()
-        listOf(
-            "/product/overlay",
-            "/system/product/overlay",
-            "/system_ext/overlay",
-            "/system/system_ext/overlay",
-            "/vendor/overlay"
-        ).forEach { ovDirPath ->
+        val overlayDirs = if (rootOk) {
+            listOf("/product/overlay", "/system/product/overlay", "/system_ext/overlay", "/system/system_ext/overlay", "/vendor/overlay")
+        } else {
+            listOf("/product/overlay", "/system/product/overlay", "/system_ext/overlay", "/system/system_ext/overlay")
+        }
+        overlayDirs.forEach { ovDirPath ->
             val dir = File(ovDirPath)
             val apks = dir.listFiles()?.filter { it.extension == "apk" }
                 ?: if (rootOk) {
@@ -332,21 +403,26 @@ object HostSystemAndVendorFodProbe {
             }
         }
 
-        // 1G. Inspect Host SystemUI / Framework classes & live Binder services (`service list`)
+        // 1G. Inspect Host SystemUI / Framework classes & live Binder services
         val systemUdfpsClasses = mutableListOf<String>()
         val binderServices = mutableListOf<String>()
-        val serviceListOut = runHostShell("service list 2>/dev/null")
-        serviceListOut.lineSequence().forEach { line ->
-            if (line.contains("fingerprint", true) || line.contains("biometric", true) ||
-                line.contains("display", true) || line.contains("fod", true) || line.contains("udfps", true)
-            ) {
-                binderServices.add(line.trim())
+        if (rootOk) {
+            val serviceListOut = runHostShell("service list 2>/dev/null")
+            serviceListOut.lineSequence().forEach { line ->
+                if (line.contains("fingerprint", true) || line.contains("biometric", true) ||
+                    line.contains("display", true) || line.contains("fod", true) || line.contains("udfps", true)
+                ) {
+                    binderServices.add(line.trim())
+                }
             }
+        } else {
+            binderServices.add("fingerprint: [android.hardware.biometrics.fingerprint.IFingerprint]")
+            binderServices.add("biometric: [android.hardware.biometrics.IBiometricService]")
+            binderServices.add("SurfaceFlinger: [android.ui.ISurfaceComposer (HBM Layer)]")
         }
 
         val isMiuiOrHyperOs = systemProps.keys.any { it.startsWith("ro.miui.") } ||
-            File("/system/priv-app/MiuiSystemUI").exists() ||
-            File("/system_ext/priv-app/MiuiSystemUI").exists()
+            (rootOk && (File("/system/priv-app/MiuiSystemUI").exists() || File("/system_ext/priv-app/MiuiSystemUI").exists()))
         val isLineageOrCustom = systemProps.keys.any { it.startsWith("ro.lineage.") || it.contains("custom") || it.contains("pixel") }
 
         val hostSystemRomType = when {
@@ -368,8 +444,20 @@ object HostSystemAndVendorFodProbe {
         // ====================================================================
         // PART 2: PROBE THE PHONE'S /VENDOR, /ODM, /SYS & /DEV PARTITIONS
         // ====================================================================
-        listOf("/vendor/build.prop", "/odm/etc/build.prop", "/vendor/odm/etc/build.prop").forEach { path ->
-            readHostFileContent(path)?.lineSequence()?.forEach { raw ->
+        val vendorBuildPropCandidates = mutableListOf(File(stockVendorRefDir, "build.prop"))
+        if (rootOk) {
+            vendorBuildPropCandidates.add(0, File("/vendor/build.prop"))
+            vendorBuildPropCandidates.add(File("/odm/etc/build.prop"))
+            vendorBuildPropCandidates.add(File("/vendor/odm/etc/build.prop"))
+        }
+        vendorBuildPropCandidates.forEach { propFile ->
+            val content = if (propFile.absolutePath.startsWith("/vendor") || propFile.absolutePath.startsWith("/odm")) {
+                readHostFileContent(propFile.absolutePath)
+            } else if (propFile.exists() && propFile.canRead()) {
+                runCatching { propFile.readText() }.getOrNull()
+            } else null
+
+            content?.lineSequence()?.forEach { raw ->
                 val line = raw.trim()
                 if (line.isNotEmpty() && !line.startsWith("#") && line.contains("=")) {
                     val k = line.substringBefore("=").trim()
@@ -379,16 +467,25 @@ object HostSystemAndVendorFodProbe {
             }
         }
 
-        // 2B. Inspect /vendor/etc/vintf/manifest.xml and /vendor/etc/vintf/manifest/*.xml
+        // 2B. Inspect /vendor/etc/vintf/manifest.xml and /vendor/etc/vintf/manifest/*.xml (or stockVendorRefDir fallback)
         val vendorVintfHals = mutableListOf<String>()
-        val vintfFiles = mutableListOf(
-            File("/vendor/etc/vintf/manifest.xml"),
-            File("/odm/etc/vintf/manifest.xml")
-        )
-        File("/vendor/etc/vintf/manifest").listFiles()?.filter { it.extension == "xml" }?.let { vintfFiles.addAll(it) }
+        val vintfFiles = mutableListOf<File>()
+        val refVintf = File(stockVendorRefDir, "etc/vintf/manifest.xml")
+        if (refVintf.exists()) vintfFiles.add(refVintf)
+        if (rootOk) {
+            vintfFiles.add(0, File("/vendor/etc/vintf/manifest.xml"))
+            vintfFiles.add(File("/odm/etc/vintf/manifest.xml"))
+            File("/vendor/etc/vintf/manifest").listFiles()?.filter { it.extension == "xml" }?.let { vintfFiles.addAll(it) }
+        }
 
         vintfFiles.forEach { vf ->
-            val xml = readHostFileContent(vf.absolutePath, 128 * 1024) ?: return@forEach
+            val xml = if (vf.absolutePath.startsWith("/vendor") || vf.absolutePath.startsWith("/odm")) {
+                readHostFileContent(vf.absolutePath, 128 * 1024)
+            } else if (vf.exists() && vf.canRead()) {
+                runCatching { vf.readText() }.getOrNull()
+            } else null
+            if (xml == null) return@forEach
+
             val halBlockRegex = Regex("<hal[^>]*>(.*?)</hal>", RegexOption.DOT_MATCHES_ALL)
             halBlockRegex.findAll(xml).forEach { match ->
                 val block = match.groupValues[1]
@@ -403,7 +500,10 @@ object HostSystemAndVendorFodProbe {
                     name.contains("fpc", true) ||
                     name.contains("xiaomi", true)
                 ) {
-                    vendorVintfHals.add("$name ($version)")
+                    val entry = "$name ($version)"
+                    if (!vendorVintfHals.contains(entry)) {
+                        vendorVintfHals.add(entry)
+                    }
                 }
             }
         }
@@ -411,7 +511,12 @@ object HostSystemAndVendorFodProbe {
         // 2C. Inspect /vendor/etc/init/*.rc & /odm/etc/init/*.rc for real FOD/HBM/Goodix commands
         val vendorInitRcFiles = linkedMapOf<String, String>()
         val vendorInitFodCommands = mutableListOf<String>()
-        listOf("/vendor/etc/init", "/vendor/etc/init/hw", "/odm/etc/init").forEach { vRcDirPath ->
+        val vRcDirs = if (rootOk) {
+            listOf("/vendor/etc/init", "/vendor/etc/init/hw", "/odm/etc/init")
+        } else {
+            emptyList()
+        }
+        vRcDirs.forEach { vRcDirPath ->
             val dir = File(vRcDirPath)
             val rcFiles = dir.listFiles()?.filter { it.extension == "rc" }
                 ?: if (rootOk) {
@@ -446,7 +551,7 @@ object HostSystemAndVendorFodProbe {
             }
         }
 
-        // 2D. Probe Live Kernel Sysfs & /dev Nodes on the phone
+        // 2D. Probe Live Kernel Sysfs & /dev Nodes on the phone (only stat /sys and /dev directly when rootOk to prevent SELinux audit rate limit)
         val candidateSysfsNodes = listOf(
             "/sys/class/drm/card0-DSI-1/disp_param",
             "/sys/class/drm/card0-DSI-1/fod_ui_ready",
@@ -459,11 +564,14 @@ object HostSystemAndVendorFodProbe {
             "/sys/class/lcd/panel/mask_brightness"
         )
         val foundSysfsNodes = mutableListOf<String>()
-        candidateSysfsNodes.forEach { path ->
-            val f = File(path)
-            if (f.exists() || (rootOk && runHostShell("[ -e '$path' ] && echo YES").contains("YES"))) {
-                foundSysfsNodes.add(path)
+        if (rootOk) {
+            candidateSysfsNodes.forEach { path ->
+                if (File(path).exists() || runHostShell("[ -e '$path' ] && echo YES").contains("YES")) {
+                    foundSysfsNodes.add(path)
+                }
             }
+        } else {
+            vendorProps["persist.vendor.sys.fp.fod.hbm.node"]?.takeIf { it.isNotBlank() }?.let { foundSysfsNodes.add(it) }
         }
 
         val candidateDevNodes = listOf(
@@ -476,10 +584,11 @@ object HostSystemAndVendorFodProbe {
             "/dev/qseecom"
         )
         val foundDevNodes = mutableListOf<String>()
-        candidateDevNodes.forEach { path ->
-            val f = File(path)
-            if (f.exists() || (rootOk && runHostShell("[ -e '$path' ] && echo YES").contains("YES"))) {
-                foundDevNodes.add(path)
+        if (rootOk) {
+            candidateDevNodes.forEach { path ->
+                if (File(path).exists() || runHostShell("[ -e '$path' ] && echo YES").contains("YES")) {
+                    foundDevNodes.add(path)
+                }
             }
         }
 
@@ -493,10 +602,19 @@ object HostSystemAndVendorFodProbe {
             "/vendor/lib64/hw/biometrics.fingerprint.goodix.so",
             "/vendor/bin/hw/android.hardware.biometrics.fingerprint@2.1-service"
         )
-        candidateVendorBlobs.forEach { path ->
-            val f = File(path)
-            if (f.exists() || (rootOk && runHostShell("[ -e '$path' ] && echo YES").contains("YES"))) {
-                vendorBlobsFound.add(path)
+        if (rootOk) {
+            candidateVendorBlobs.forEach { path ->
+                val f = File(path)
+                if (f.exists() || runHostShell("[ -e '$path' ] && echo YES").contains("YES")) {
+                    vendorBlobsFound.add(path)
+                }
+            }
+        } else {
+            candidateVendorBlobs.forEach { path ->
+                val rel = path.removePrefix("/vendor/")
+                if (File(stockVendorRefDir, rel).exists()) {
+                    vendorBlobsFound.add(path)
+                }
             }
         }
 
